@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""GUI for sending servo positioning commands to a Master board over USB serial.
+
+Talks the line-based JSON protocol described in ../docs/serial-protocol.md:
+  -> {"node": <0-250>, "angle": <deg>}   move a node (0 = all nodes)
+  -> {"cmd": "list"}                     ask for the Master's known-node table
+  <- {"ok": true|false, "error": "..."}  ack/error for a move command
+  <- {"type": "nodes", "nodes": [...]}   known-node table
+
+Requires: pyserial (`pip install pyserial`). Tkinter ships with most desktop
+Python installs; on Debian/Ubuntu install `python3-tk` if it's missing.
+"""
+
+import json
+import queue
+import threading
+import time
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+import serial
+from serial.tools import list_ports
+
+BAUD_RATE = 115200
+NODE_POLL_INTERVAL_MS = 2000
+JOG_SEND_INTERVAL_S = 0.04  # ~25 Hz, matches the web UI's jog slider throttle
+MAX_LOG_LINES = 500
+
+
+class SerialLink:
+    """Owns the serial port and a background line-reader thread.
+
+    Reads happen off the Tk main thread (blocking readline() would freeze the
+    GUI); received lines are handed to `on_line` which must be thread-safe —
+    callers marshal them onto the main thread via a queue.Queue.
+    """
+
+    def __init__(self, on_line, on_error):
+        self._ser = None
+        self._reader_thread = None
+        self._stop_event = threading.Event()
+        self._on_line = on_line
+        self._on_error = on_error
+
+    @property
+    def is_open(self):
+        return self._ser is not None and self._ser.is_open
+
+    def connect(self, port):
+        self._ser = serial.Serial(port, BAUD_RATE, timeout=0.2)
+        self._stop_event.clear()
+        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader_thread.start()
+
+    def disconnect(self):
+        self._stop_event.set()
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=1.0)
+        self._reader_thread = None
+        if self._ser is not None:
+            self._ser.close()
+        self._ser = None
+
+    def send(self, obj):
+        if not self.is_open:
+            raise RuntimeError("not connected")
+        line = json.dumps(obj) + "\n"
+        self._ser.write(line.encode("utf-8"))
+        return line
+
+    def _read_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                raw = self._ser.readline()
+            except (serial.SerialException, OSError) as exc:
+                if not self._stop_event.is_set():
+                    self._on_error(str(exc))
+                return
+            if not raw:
+                continue
+            text = raw.decode("utf-8", errors="replace").rstrip()
+            if text:
+                self._on_line(text)
+
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        root.title("Servo Rig — Master Bridge")
+        root.geometry("640x560")
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        self.incoming = queue.Queue()
+        self.link = SerialLink(on_line=self.incoming.put, on_error=self._on_link_error)
+        self.nodes = {}  # node_id -> {"angle": float, "age_ms": int}
+        self._jog_last_sent = 0.0
+        self._poll_job = None
+
+        self._build_widgets()
+        self._refresh_ports()
+        self._set_connected_state(False)
+        self.root.after(50, self._drain_incoming)
+
+    # ---------- UI construction ----------
+    def _build_widgets(self):
+        conn = ttk.Frame(self.root, padding=8)
+        conn.pack(fill="x")
+
+        ttk.Label(conn, text="Port:").pack(side="left")
+        self.port_var = tk.StringVar()
+        self.port_combo = ttk.Combobox(conn, textvariable=self.port_var, width=28, state="readonly")
+        self.port_combo.pack(side="left", padx=(4, 4))
+        ttk.Button(conn, text="Refresh", command=self._refresh_ports).pack(side="left")
+
+        self.connect_btn = ttk.Button(conn, text="Connect", command=self._toggle_connect)
+        self.connect_btn.pack(side="left", padx=(8, 0))
+
+        self.status_var = tk.StringVar(value="disconnected")
+        ttk.Label(conn, textvariable=self.status_var, foreground="#a33").pack(side="left", padx=(10, 0))
+
+        nodes_frame = ttk.LabelFrame(
+            self.root, text="Known nodes (ctrl/shift-click to select several as the send target)", padding=8
+        )
+        nodes_frame.pack(fill="both", expand=False, padx=8, pady=(0, 8))
+
+        self.node_tree = ttk.Treeview(
+            nodes_frame, columns=("angle", "age"), show="tree headings", height=5, selectmode="extended"
+        )
+        self.node_tree.heading("#0", text="Node ID")
+        self.node_tree.column("#0", width=100)
+        self.node_tree.heading("angle", text="Angle")
+        self.node_tree.heading("age", text="Last seen")
+        self.node_tree.column("angle", width=100, anchor="center")
+        self.node_tree.column("age", width=120, anchor="center")
+        self.node_tree.pack(side="left", fill="x", expand=True)
+
+        btns = ttk.Frame(nodes_frame)
+        btns.pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="Refresh now", command=self._request_node_list).pack(fill="x")
+        self.autopoll_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(btns, text="Auto-refresh (2s)", variable=self.autopoll_var).pack(fill="x", pady=(4, 0))
+
+        send = ttk.LabelFrame(self.root, text="Send position command", padding=8)
+        send.pack(fill="x", padx=8, pady=(0, 8))
+
+        self.all_nodes_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            send, text="All nodes (broadcast) — overrides the selection above", variable=self.all_nodes_var
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(send, text="Fallback node ID (used if nothing is selected above):").grid(
+            row=0, column=2, columnspan=2, sticky="w"
+        )
+        self.node_var = tk.IntVar(value=0)
+        ttk.Spinbox(send, from_=0, to=250, textvariable=self.node_var, width=6).grid(
+            row=0, column=4, sticky="w", padx=(4, 0)
+        )
+
+        ttk.Label(send, text="Angle (deg):").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.angle_var = tk.DoubleVar(value=135.0)
+        self.angle_entry = ttk.Entry(send, textvariable=self.angle_var, width=8)
+        self.angle_entry.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self.angle_entry.bind("<Return>", lambda e: self._send_command())
+
+        self.angle_scale = ttk.Scale(
+            send, from_=0, to=270, orient="horizontal", command=self._on_scale_move
+        )
+        self.angle_scale.set(135.0)
+        self.angle_scale.grid(row=1, column=2, columnspan=3, sticky="ew", pady=(8, 0))
+        send.columnconfigure(4, weight=1)
+
+        self.live_jog_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            send, text="Live jog while dragging (throttled ~25 Hz)", variable=self.live_jog_var
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        ttk.Button(send, text="Send", command=self._send_command).grid(row=2, column=4, sticky="e", pady=(8, 0))
+
+        log_frame = ttk.LabelFrame(self.root, text="Serial log", padding=8)
+        log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="none")
+        self.log_text.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+        scroll.pack(side="right", fill="y")
+        self.log_text.configure(yscrollcommand=scroll.set)
+
+    # ---------- port / connection handling ----------
+    def _refresh_ports(self):
+        ports = [p.device for p in list_ports.comports()]
+        self.port_combo["values"] = ports
+        if ports and not self.port_var.get():
+            self.port_var.set(ports[0])
+
+    def _toggle_connect(self):
+        if self.link.is_open:
+            self._disconnect()
+        else:
+            self._connect()
+
+    def _connect(self):
+        port = self.port_var.get()
+        if not port:
+            messagebox.showwarning("No port selected", "Choose a serial port first.")
+            return
+        try:
+            self.link.connect(port)
+        except (serial.SerialException, OSError) as exc:
+            messagebox.showerror("Connection failed", str(exc))
+            return
+        self._set_connected_state(True)
+        self._log(f"-- connected to {port} @ {BAUD_RATE} baud --")
+        self._request_node_list()
+        self._schedule_node_poll()
+
+    def _disconnect(self):
+        self.link.disconnect()
+        self._set_connected_state(False)
+        self._log("-- disconnected --")
+        if self._poll_job is not None:
+            self.root.after_cancel(self._poll_job)
+            self._poll_job = None
+
+    def _on_link_error(self, message):
+        self.incoming.put(f"__ERROR__{message}")
+
+    def _set_connected_state(self, connected):
+        self.connect_btn.configure(text="Disconnect" if connected else "Connect")
+        self.status_var.set("connected" if connected else "disconnected")
+        self.status_var_color = "#2a2" if connected else "#a33"
+        self.port_combo.configure(state="disabled" if connected else "readonly")
+
+    # ---------- sending ----------
+    def _resolve_targets(self):
+        """Which node id(s) a Send/jog action should reach right now.
+
+        All-nodes checkbox wins if checked; otherwise the Treeview's
+        (possibly multi-) selection; otherwise the fallback spinbox, for
+        targeting a node that hasn't sent a heartbeat yet.
+        """
+        if self.all_nodes_var.get():
+            return [0]
+        selected = self.node_tree.selection()
+        if selected:
+            return [int(iid) for iid in selected]
+        return [int(self.node_var.get())]
+
+    def _on_scale_move(self, value_str):
+        angle = round(float(value_str), 1)
+        self.angle_var.set(angle)
+        if self.live_jog_var.get() and self.link.is_open:
+            now = time.monotonic()
+            if now - self._jog_last_sent >= JOG_SEND_INTERVAL_S:
+                self._jog_last_sent = now
+                self._send_command(quiet=True)
+
+    def _send_command(self, quiet=False):
+        if not self.link.is_open:
+            if not quiet:
+                messagebox.showwarning("Not connected", "Connect to the Master's serial port first.")
+            return
+        try:
+            targets = self._resolve_targets()
+            angle = float(self.angle_var.get())
+        except (tk.TclError, ValueError):
+            messagebox.showerror("Invalid input", "Node ID and angle must be numbers.")
+            return
+        # A multi-node selection is a client-side fan-out: one JSON line per
+        # target, the wire protocol itself only ever addresses one id (or 0
+        # for broadcast) per line.
+        for node_id in targets:
+            try:
+                line = self.link.send({"node": node_id, "angle": angle})
+            except (RuntimeError, serial.SerialException, OSError) as exc:
+                messagebox.showerror("Send failed", str(exc))
+                return
+            self._log(f"-> {line.rstrip()}")
+
+    def _request_node_list(self):
+        if not self.link.is_open:
+            return
+        try:
+            line = self.link.send({"cmd": "list"})
+            self._log(f"-> {line.rstrip()}")
+        except (RuntimeError, serial.SerialException, OSError) as exc:
+            self._log(f"-- send failed: {exc} --")
+
+    def _schedule_node_poll(self):
+        if self.autopoll_var.get() and self.link.is_open:
+            self._request_node_list()
+        self._poll_job = self.root.after(NODE_POLL_INTERVAL_MS, self._schedule_node_poll)
+
+    # ---------- incoming data ----------
+    def _drain_incoming(self):
+        try:
+            while True:
+                text = self.incoming.get_nowait()
+                if text.startswith("__ERROR__"):
+                    self._handle_link_error(text[len("__ERROR__"):])
+                else:
+                    self._handle_incoming_line(text)
+        except queue.Empty:
+            pass
+        self.root.after(50, self._drain_incoming)
+
+    def _handle_link_error(self, message):
+        self._log(f"-- serial error: {message} --")
+        self._set_connected_state(False)
+
+    def _handle_incoming_line(self, text):
+        self._log(f"<- {text}")
+        try:
+            msg = json.loads(text)
+        except json.JSONDecodeError:
+            return
+        if isinstance(msg, dict) and msg.get("type") == "nodes":
+            self.nodes = {n["id"]: n for n in msg.get("nodes", []) if "id" in n}
+            self._refresh_node_table()
+
+    def _refresh_node_table(self):
+        previously_selected = set(self.node_tree.selection())
+        self.node_tree.delete(*self.node_tree.get_children())
+        for node_id in sorted(self.nodes):
+            n = self.nodes[node_id]
+            age_s = n.get("age_ms", 0) / 1000.0
+            self.node_tree.insert(
+                "", "end", iid=str(node_id), text=str(node_id),
+                values=(f"{n.get('angle', 0):.1f}°", f"{age_s:.1f}s ago"),
+            )
+        # Re-apply the selection across the rebuild (Treeview.delete forgets it).
+        still_present = [iid for iid in previously_selected if self.node_tree.exists(iid)]
+        if still_present:
+            self.node_tree.selection_set(still_present)
+
+    def _log(self, line):
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", line + "\n")
+        num_lines = int(self.log_text.index("end-1c").split(".")[0])
+        if num_lines > MAX_LOG_LINES:
+            self.log_text.delete("1.0", f"{num_lines - MAX_LOG_LINES}.0")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    # ---------- shutdown ----------
+    def on_close(self):
+        if self._poll_job is not None:
+            self.root.after_cancel(self._poll_job)
+        self.link.disconnect()
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

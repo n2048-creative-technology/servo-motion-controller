@@ -66,5 +66,9 @@ private:
   KnownNode knownNodes_[NET_MAX_TRACKED_NODES];
 
   void recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now);
+
+public:
+  // Called from the ESP-NOW C callback trampoline; not part of the public
+  // API surface otherwise (needs to be reachable from a free function).
   void onRecv(const uint8_t *data, int len);
 };

@@ -176,6 +176,58 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   display: block;
 }
 
+.hint code {
+  background: #14161a;
+  border: 1px solid var(--card-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 0.85em;
+}
+
+.nodechecklist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-bottom: 12px;
+}
+.nodechecklist label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+}
+.nodechecklist input { width: 18px; height: 18px; }
+
+.targetrow {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.targetrow input[type="number"] {
+  width: 80px;
+  padding: 10px 12px;
+  font-size: 1rem;
+  background: #14161a;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  color: var(--text);
+}
+.targetrow .btn { flex: 1; }
+
+.nodetable {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.nodetable th, .nodetable td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--card-border);
+  font-size: 0.85rem;
+}
+.nodetable th { color: var(--text-dim); font-weight: 600; }
+
 .tabbar {
   position: fixed;
   bottom: 0;

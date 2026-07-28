@@ -102,6 +102,50 @@ See [docs/api.md](docs/api.md) for the full route table and payload shapes.
 WebSocket `/ws` pushes `{"type":"status", mode, angle, ...}` at ~10 Hz and
 accepts `{"cmd":"jog","angle":123.4}` for low-latency manual moves.
 
+## Multi-board Master/Node mode (v2)
+
+Every board still runs the same firmware and, by default, is exactly the
+self-contained single-servo rig described above (**Standalone** mode). On top
+of that, a board can be switched (Settings → Network) into:
+
+- **Node** — everything Standalone does, plus a **Node ID** (1–250) and an
+  ESP-NOW listener: it accepts wireless positioning commands from a Master in
+  addition to local jog/pattern/sequence control, and reports its status as
+  `mode: "network"` while being driven that way. A local jog on the same
+  board's web UI still takes over immediately (last command wins — there's no
+  arbitration between the two sources).
+- **Master** — a bridge, not a servo controller: connect it to a PC over
+  USB-C and it relays newline-delimited JSON commands from that serial port
+  to every Node in ESP-NOW range. See [docs/serial-protocol.md](docs/serial-protocol.md)
+  for the wire format (`{"node":3,"angle":120.5}`, `{"cmd":"list"}`, etc.)
+  and a `pyserial` example. A Master needs no servo attached.
+
+  A Master's **own web UI works too**: its Manual tab gets a "Target" card
+  (Settings → Network → Master) listing known Nodes as checkboxes — select
+  one, several, or check "All nodes" — and the existing Jog slider / Pattern
+  controls drive that selection over ESP-NOW instead of a local servo. Handy
+  for driving the rig by hand from a phone without any PC involved at all;
+  the serial bridge above is for scripted/external control.
+
+  For PC-driven control there's also [scripts-tools/master_gui.py](scripts-tools/master_gui.py),
+  a small Tkinter app that connects to a Master's serial port, shows its known
+  Nodes, and lets you jog/send positions to a selection of them (or broadcast
+  to all) without writing any code — see [scripts-tools/README.md](scripts-tools/README.md).
+
+How it works: Master and Nodes talk over **ESP-NOW** (direct ESP32-to-ESP32
+radio, no router involved), broadcasting on the same fixed AP WiFi channel
+every board already uses (`AP_WIFI_CHANNEL` in `firmware/include/Config.h`).
+That's what makes it a drop-in addition to the existing self-contained-AP
+design — no board has to join anyone else's network. The only setup step per
+board is picking its mode and, for Nodes, a unique Node ID, from its own
+Settings → Network tab; changes take effect after a reboot.
+
+Known limitation: like the rest of this project's networking, there's no
+encryption or pairing beyond the shared channel + Node ID — anyone else's
+ESP-NOW traffic on the same channel with a colliding Node ID could also drive
+a Node. Fine for a single installation's private RF environment; don't rely
+on it where that's not true.
+
 ## Storage
 
 - Servo calibration, AP credentials, and autostart config live in NVS
@@ -120,9 +164,19 @@ accepts `{"cmd":"jog","angle":123.4}` for low-latency manual moves.
 - Captive-portal auto-popup varies by phone OS; the DNS catch-all + redirect
   is best-effort, `192.168.4.1` is the documented fallback.
 - No STA/recovery network — see the access point section above.
-- Flash is fairly full (69.5% of the app partition after this build) since
+- Flash is fairly full (70.5% of the app partition as of v2) since
   `ESPAsyncWebServer` + `ArduinoJson` + `ESP32Servo` are meaningfully sized
   libraries on a 1.25MB app partition. If you add more features and hit the
   ceiling, look at a non-OTA partition table (`board_build.partitions`) to
   reclaim the unused second OTA app slot.
+- Master/Node mode (v2) is build-verified (`pio run` / `-t buildfs` both
+  succeed) and one board has been flashed and boot-confirmed over serial in
+  this environment, but the actual ESP-NOW link between a Master and a Node
+  (a real serial or web-UI command moving a *remote* servo) hasn't been
+  hands-on verified end-to-end yet — flash a second board as a Node with a
+  chosen Node ID and confirm it responds before relying on this in the field.
+- `scripts-tools/master_gui.py` (the PC GUI) is only syntax/compile-checked
+  here — this sandbox has no display server (no Xvfb), so the Tkinter window
+  itself hasn't been visually exercised. Worth a quick manual run before
+  relying on it for a show.
 # servo-motion-controller

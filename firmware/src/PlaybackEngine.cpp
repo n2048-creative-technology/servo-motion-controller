@@ -1,11 +1,10 @@
 #include "PlaybackEngine.h"
 
-#include "ServoController.h"
 #include "SequenceStore.h"
 #include "Config.h"
 
-void PlaybackEngine::begin(ServoController *servo, SequenceStore *sequence) {
-  servo_ = servo;
+void PlaybackEngine::begin(IAngleSink *sink, SequenceStore *sequence) {
+  servo_ = sink;
   sequence_ = sequence;
   mode_ = PlaybackMode::IDLE;
 }

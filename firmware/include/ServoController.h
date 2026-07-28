@@ -2,15 +2,16 @@
 
 #include <ESP32Servo.h>
 #include <stdint.h>
+#include "IAngleSink.h"
 
-class ServoController {
+class ServoController : public IAngleSink {
 public:
   void begin(uint8_t pin, uint16_t minUs, uint16_t maxUs, float minAngle, float maxAngle);
 
   // Clamps to the calibrated angle range and writes the pulse.
-  void writeAngle(float degrees);
+  void writeAngle(float degrees) override;
 
-  float getAngle() const { return currentAngle_; }
+  float getAngle() const override { return currentAngle_; }
 
   void setCalibration(uint16_t minUs, uint16_t maxUs, float minAngle, float maxAngle);
 

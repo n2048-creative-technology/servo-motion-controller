@@ -10,13 +10,14 @@ class SequenceStore;
 class SettingsStore;
 class ServoController;
 class NetworkLink;
+class IAngleSink;
 
 // Owns the HTTP/WebSocket server and the captive-portal DNS catch-all.
 // Registers all /api/* routes and serves the LittleFS-hosted single-page app.
 class WebApi {
 public:
   void begin(PlaybackEngine *playback, SequenceStore *sequence, SettingsStore *settingsStore,
-             ServoController *servo, NetworkLink *network, const IPAddress &apIp);
+             ServoController *servo, NetworkLink *network, IAngleSink *angleSink, const IPAddress &apIp);
 
   // Call every loop() iteration: services DNS captive-portal requests and
   // throttles the periodic WebSocket status broadcast internally.
@@ -32,6 +33,7 @@ private:
   SettingsStore *settingsStore_ = nullptr;
   ServoController *servo_ = nullptr;
   NetworkLink *network_ = nullptr;
+  IAngleSink *angleSink_ = nullptr;
 
   uint32_t lastStatusBroadcastMs_ = 0;
 

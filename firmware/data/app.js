@@ -15,6 +15,11 @@
   let ws = null;
   let lastStatus = null;
   let recTrace = []; // {t, angle} while recording, relative ms
+  let isMaster = false;
+  let knownNodes = []; // [{id,angle,age_ms}] from /api/network/nodes
+  let targetAllMode = true;
+  let selectedTargets = new Set(); // checked node ids (used when targetAllMode is false)
+  let extraTargetNodes = new Set(); // manually-added ids not (yet) in knownNodes
 
   // ---------- tiny helpers ----------
   const $ = (id) => document.getElementById(id);
@@ -268,12 +273,119 @@
       );
     }
     updateAsPatternVisibility();
+
+    $("netMode").value = s.network.mode;
+    $("netNodeId").value = s.network.node_id;
+    updateNetVisibility();
   }
 
   function updateAsPatternVisibility() {
     const show = $("asTarget").value === "pattern";
     $("asPatternTypeField").style.display = show ? "" : "none";
     $("asPatternParams").style.display = show ? "" : "none";
+  }
+
+  // ---------- network (master/node) tab actions ----------
+  let nodesPollTimer = null;
+
+  function updateNetVisibility() {
+    const mode = $("netMode").value;
+    $("netNodeIdField").style.display = mode === "node" ? "" : "none";
+    $("netMasterInfo").style.display = mode === "master" ? "" : "none";
+  }
+
+  // Shared by the Settings tab's known-nodes table and the Manual tab's
+  // target picker (Master only) — one poll, two views of the same data.
+  async function refreshKnownNodes() {
+    if (!isMaster) return;
+    const res = await apiGet("/api/network/nodes").catch(() => null);
+    knownNodes = (res && res.nodes) || [];
+
+    const body = $("netNodesBody");
+    if (body) {
+      body.innerHTML = knownNodes.length
+        ? knownNodes
+            .map((n) => `<tr><td>${n.id}</td><td>${n.angle.toFixed(1)}&deg;</td><td>${(n.age_ms / 1000).toFixed(1)}s ago</td></tr>`)
+            .join("")
+        : '<tr><td colspan="3">no nodes heard from yet</td></tr>';
+    }
+
+    renderTargetChecklist();
+  }
+
+  function renderTargetChecklist() {
+    const container = $("targetNodesList");
+    if (!container) return;
+
+    const angleById = new Map(knownNodes.map((n) => [n.id, n.angle]));
+    const ids = new Set([...knownNodes.map((n) => n.id), ...extraTargetNodes]);
+
+    container.innerHTML = "";
+    [...ids].sort((a, b) => a - b).forEach((id) => {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.disabled = targetAllMode;
+      input.checked = selectedTargets.has(id);
+      input.addEventListener("change", () => {
+        if (input.checked) selectedTargets.add(id);
+        else selectedTargets.delete(id);
+      });
+      const span = document.createElement("span");
+      span.textContent = angleById.has(id) ? `Node ${id} (${angleById.get(id).toFixed(1)}°)` : `Node ${id}`;
+      label.appendChild(input);
+      label.appendChild(span);
+      container.appendChild(label);
+    });
+    if (ids.size === 0) {
+      container.innerHTML = '<span class="hint">no nodes heard from yet — add one by ID below</span>';
+    }
+  }
+
+  function startNodesPolling() {
+    if (nodesPollTimer) clearInterval(nodesPollTimer);
+    refreshKnownNodes();
+    nodesPollTimer = setInterval(refreshKnownNodes, 2000);
+  }
+
+  // ---------- target selector (Manual tab, Master only) ----------
+  function initTargetControls() {
+    $("targetAll").addEventListener("change", () => {
+      targetAllMode = $("targetAll").checked;
+      renderTargetChecklist();
+    });
+
+    $("targetAddNode").addEventListener("click", () => {
+      const id = parseInt($("targetNodeId").value, 10);
+      if (!Number.isInteger(id) || id < 1 || id > 250) return;
+      extraTargetNodes.add(id);
+      selectedTargets.add(id);
+      targetAllMode = false;
+      $("targetAll").checked = false;
+      $("targetNodeId").value = "";
+      renderTargetChecklist();
+    });
+
+    $("targetApply").addEventListener("click", async () => {
+      await apiPost("/api/network/targets", {
+        broadcast_all: targetAllMode,
+        node_ids: [...selectedTargets],
+      });
+    });
+  }
+
+  async function initMasterUi() {
+    const settings = await apiGet("/api/settings");
+    isMaster = settings.network.mode === "master";
+    if (!isMaster) return;
+
+    $("targetCard").style.display = "";
+    const targets = await apiGet("/api/network/targets").catch(() => ({ broadcast_all: true, node_ids: [] }));
+    targetAllMode = targets.broadcast_all !== false;
+    selectedTargets = new Set(targets.node_ids || []);
+    extraTargetNodes = new Set(targets.node_ids || []);
+    $("targetAll").checked = targetAllMode;
+    startNodesPolling();
   }
 
   function initSettingsControls() {
@@ -320,6 +432,21 @@
         apiPost("/api/settings/reset").then(loadSettings);
       }
     });
+
+    $("netMode").addEventListener("change", () => {
+      updateNetVisibility();
+      refreshNodesTable();
+    });
+
+    $("netSave").addEventListener("click", async () => {
+      await apiPost("/api/settings", {
+        network: {
+          mode: $("netMode").value,
+          node_id: parseInt($("netNodeId").value, 10),
+        },
+      });
+      if (confirm("Network settings saved. Reboot now to apply?")) apiPost("/api/reboot");
+    });
   }
 
   // ---------- boot ----------
@@ -329,9 +456,11 @@
     initPatternControls();
     initRecordControls();
     initSettingsControls();
+    initTargetControls();
     connectWs();
     await loadPatterns();
     await refreshSequenceInfo();
+    await initMasterUi();
   }
 
   document.addEventListener("DOMContentLoaded", init);

@@ -20,6 +20,23 @@
 <main>
 
   <section id="tab-manual" class="tab active">
+    <div class="card" id="targetCard" style="display:none;">
+      <h2>Target (Master)</h2>
+      <p class="hint">Jog and Pattern below drive the selected node(s) over ESP-NOW instead of a local servo.</p>
+      <label class="field checkfield">
+        <input id="targetAll" type="checkbox" checked>
+        <span>All nodes (broadcast)</span>
+      </label>
+      <div id="targetNodesList" class="nodechecklist"></div>
+      <div class="targetrow">
+        <input id="targetNodeId" type="number" min="1" max="250" step="1" placeholder="node id">
+        <button id="targetAddNode" class="btn btn-primary">Add</button>
+      </div>
+      <div class="btnrow">
+        <button id="targetApply" class="btn btn-primary">Apply Selection</button>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Jog</h2>
       <input id="jogSlider" type="range" min="0" max="270" step="0.5" value="135" class="jog">
@@ -122,6 +139,33 @@
       <div id="asPatternParams" class="paramgrid"></div>
       <div class="btnrow">
         <button id="asSave" class="btn btn-primary">Save Autostart</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Network (Master/Node)</h2>
+      <p class="hint">Wires multiple boards together over ESP-NOW so a Master can relay positioning commands from a PC to servos on other boards. Requires a reboot to take effect after changing.</p>
+      <label class="field">
+        <span>Mode</span>
+        <select id="netMode">
+          <option value="standalone">Standalone (default)</option>
+          <option value="node">Node &mdash; controlled by a Master</option>
+          <option value="master">Master &mdash; bridges PC serial to Nodes</option>
+        </select>
+      </label>
+      <label class="field" id="netNodeIdField">
+        <span>Node ID (1&ndash;250, must be unique per board)</span>
+        <input id="netNodeId" type="number" min="1" max="250" step="1">
+      </label>
+      <div id="netMasterInfo" class="hint">
+        Connect this board to a PC over USB serial at 115200 baud and send one JSON object per line, e.g. <code>{"node":3,"angle":120.5}</code> (<code>node:0</code> = all nodes), or <code>{"cmd":"list"}</code> to list known nodes. See <code>docs/serial-protocol.md</code>.
+        <table id="netNodesTable" class="nodetable">
+          <thead><tr><th>Node ID</th><th>Angle</th><th>Last seen</th></tr></thead>
+          <tbody id="netNodesBody"><tr><td colspan="3">no nodes heard from yet</td></tr></tbody>
+        </table>
+      </div>
+      <div class="btnrow">
+        <button id="netSave" class="btn btn-primary">Save Network Settings</button>
       </div>
     </div>
 

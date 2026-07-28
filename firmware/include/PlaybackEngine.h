@@ -3,8 +3,8 @@
 #include <stdint.h>
 #include "PatternEngine.h"
 #include "SettingsStore.h"
+#include "IAngleSink.h"
 
-class ServoController;
 class SequenceStore;
 
 enum class PlaybackMode : uint8_t {
@@ -22,7 +22,7 @@ enum class PlaybackMode : uint8_t {
 // server init (autostart) as well as from REST/WS handlers at request time.
 class PlaybackEngine {
 public:
-  void begin(ServoController *servo, SequenceStore *sequence);
+  void begin(IAngleSink *sink, SequenceStore *sequence);
 
   // Call every TICK_INTERVAL_MS from loop().
   void tick(uint32_t now);
@@ -53,7 +53,7 @@ public:
   const PatternParams &activePattern() const { return activePattern_; }
 
 private:
-  ServoController *servo_ = nullptr;
+  IAngleSink *servo_ = nullptr;
   SequenceStore *sequence_ = nullptr;
   PlaybackMode mode_ = PlaybackMode::IDLE;
   uint32_t modeStartMs_ = 0;

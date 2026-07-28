@@ -3,12 +3,14 @@
 #include <LittleFS.h>
 
 #include "Config.h"
+#include "IAngleSink.h"
 #include "ServoController.h"
 #include "SettingsStore.h"
 #include "SequenceStore.h"
 #include "PlaybackEngine.h"
 #include "WebApi.h"
 #include "NetworkLink.h"
+#include "NetworkAngleSink.h"
 #include "SerialBridge.h"
 
 ServoController servo;
@@ -17,6 +19,7 @@ SequenceStore sequenceStore;
 PlaybackEngine playback;
 WebApi webApi;
 NetworkLink networkLink;
+NetworkAngleSink networkAngleSink;
 SerialBridge serialBridge;
 
 static const IPAddress AP_IP(192, 168, 4, 1);
@@ -53,20 +56,6 @@ void setup() {
     Serial.println("[SELFTEST] sequence file: none");
   }
 
-  playback.begin(&servo, &sequenceStore);
-  // Applied before networking comes up: a configured pattern/sequence is
-  // already looping with zero user interaction, surviving reset/power-cycle.
-  // Skipped for MASTER boards, which bridge PC<->network commands rather
-  // than driving a locally-attached servo.
-  if (settings.networkMode != OperatingMode::MASTER) {
-    playback.applyAutostart(settings, millis());
-    if (settings.autostartEnabled) {
-      Serial.printf("[SELFTEST] autostart engaged: mode=%d\n", static_cast<int>(playback.mode()));
-    } else {
-      Serial.println("[SELFTEST] autostart disabled");
-    }
-  }
-
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
   const bool hasPassword = strlen(settings.apPassword) >= 8;
@@ -76,13 +65,33 @@ void setup() {
                 WiFi.softAPIP().toString().c_str());
 
   networkLink.begin(settings.networkMode, settings.nodeId);
-  if (settings.networkMode == OperatingMode::NODE) {
-    networkLink.onNodeCommand([](float angleDeg) { playback.onNetworkCommand(angleDeg, millis()); });
-  } else if (settings.networkMode == OperatingMode::MASTER) {
+
+  // MASTER drives selected Node(s) over ESP-NOW instead of a local servo, so
+  // PlaybackEngine's jog/pattern/sequence logic is repointed at a
+  // NetworkAngleSink; every other mode drives the physical ServoController
+  // exactly as in v1. Autostart only makes sense with a real attached servo.
+  IAngleSink *sink = &servo;
+  if (settings.networkMode == OperatingMode::MASTER) {
+    networkAngleSink.begin(&networkLink);
+    sink = &networkAngleSink;
     serialBridge.begin(&networkLink);
+  } else if (settings.networkMode == OperatingMode::NODE) {
+    networkLink.onNodeCommand([](float angleDeg) { playback.onNetworkCommand(angleDeg, millis()); });
+  }
+  playback.begin(sink, &sequenceStore);
+
+  if (settings.networkMode != OperatingMode::MASTER) {
+    // Applied before the web server comes up: a configured pattern/sequence
+    // is already looping with zero user interaction, surviving reset/power-cycle.
+    playback.applyAutostart(settings, millis());
+    if (settings.autostartEnabled) {
+      Serial.printf("[SELFTEST] autostart engaged: mode=%d\n", static_cast<int>(playback.mode()));
+    } else {
+      Serial.println("[SELFTEST] autostart disabled");
+    }
   }
 
-  webApi.begin(&playback, &sequenceStore, &settingsStore, &servo, &networkLink, AP_IP);
+  webApi.begin(&playback, &sequenceStore, &settingsStore, &servo, &networkLink, sink, AP_IP);
   Serial.println("[SELFTEST] webserver started, ws clients=0");
 
   Serial.printf("[SELFTEST] free heap=%u bytes, network mode=%d node_id=%u\n", ESP.getFreeHeap(),

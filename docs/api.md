@@ -6,11 +6,13 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 
 | Method | Route | Body | Response / notes |
 |---|---|---|---|
-| GET | `/api/status` | — | `{mode, angle, uptime_ms, free_heap, recording:{active,points}, sequence:{present,points,duration_ms}}` |
+| GET | `/api/status` | — | `{mode, angle, uptime_ms, free_heap, firmware_version, recording:{active,points}, sequence:{present,points,duration_ms}}` |
 | GET | `/api/patterns` | — | `[{type, label, params: "comma,separated,keys"}]` — drives the UI's generated param forms |
 | POST | `/api/pattern/start` | `{type, period_ms, amplitude_deg, offset_deg, duty_pct?, rise_pct?, hold_pct?, fall_pct?}` | mode → `pattern`, loops until stopped |
 | POST | `/api/pattern/stop` | — | mode → `manual`, holds last angle |
 | POST | `/api/manual/jog` | `{angle_deg}` | REST fallback for manual moves; prefer WS `jog` for latency |
+| GET | `/api/network/targets` | — | `{broadcast_all, node_ids:[...]}` — Master only: which Node(s) `manual/jog`, WS `jog`, and `pattern/start` currently drive |
+| POST | `/api/network/targets` | `{broadcast_all, node_ids:[...]}` | Master only: retarget jog/pattern output — broadcast to all Nodes, or an explicit id list (client-side fan-out, one ESP-NOW CMD per id); ephemeral, resets to broadcast-all on reboot |
 | POST | `/api/record/start` | — | clears the in-RAM recording buffer, mode → `recording` |
 | POST | `/api/record/stop` | — | mode → `manual`; buffer is kept until save/discard |
 | POST | `/api/record/save` | — | writes the buffer to `/sequence.bin` |
@@ -18,12 +20,24 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 | GET | `/api/sequence` | — | `{present, points, duration_ms}` for the saved sequence |
 | POST | `/api/sequence/play` | — | mode → `sequence`, loops the saved recording |
 | POST | `/api/sequence/stop` | — | mode → `manual` |
-| GET | `/api/settings` | — | `{ap:{ssid,has_password}, servo:{min_us,max_us,min_angle,max_angle,center_angle}, autostart:{enabled,target,pattern}}` — password is never echoed back |
-| POST | `/api/settings` | any subset of the GET shape (`ap.password` only if changing it) | persists to NVS; servo calibration changes take effect immediately |
+| GET | `/api/settings` | — | `{ap:{ssid,has_password}, servo:{min_us,max_us,min_angle,max_angle,center_angle}, autostart:{enabled,target,pattern}, network:{mode,node_id}}` — password is never echoed back |
+| POST | `/api/settings` | any subset of the GET shape (`ap.password` only if changing it) | persists to NVS; servo calibration changes take effect immediately, `network.*` changes need a reboot (see `/api/reboot`) |
 | POST | `/api/settings/reset` | — | restores factory defaults (only recovery path if AP credentials are forgotten) |
-| POST | `/api/reboot` | — | applies pending AP credential changes via `ESP.restart()` |
+| POST | `/api/reboot` | — | applies pending AP credential / network-mode changes via `ESP.restart()` |
+| GET | `/api/network/nodes` | — | `{nodes:[{id,angle,age_ms}, ...]}` — a Master's in-RAM table of Nodes it has heard an ESP-NOW heartbeat from; empty list on Standalone/Node boards |
 
-`mode` is one of `idle`, `manual`, `recording`, `pattern`, `sequence`.
+`mode` is one of `idle`, `manual`, `recording`, `pattern`, `sequence`, `network`
+(`network` = last moved by a wireless command from a Master, Node boards only).
+
+`network.mode` is one of `standalone` (default), `node`, `master` — see
+[serial-protocol.md](serial-protocol.md) for the Master's PC-facing protocol
+and the ESP-NOW design behind Master/Node mode.
+
+On a **Master** board, `/api/manual/jog`, the WS `jog` command, and
+`/api/pattern/*` don't drive a local servo at all — they drive whichever
+Node(s) `/api/network/targets` currently selects, over ESP-NOW. `GET
+/api/status`'s `angle`/`mode` then reflect the last commanded network angle,
+not a physical servo position.
 
 ## WebSocket `/ws`
 

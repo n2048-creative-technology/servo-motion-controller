@@ -4,12 +4,14 @@
 #include <ArduinoJson.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <vector>
 
 #include "PlaybackEngine.h"
 #include "SequenceStore.h"
 #include "SettingsStore.h"
 #include "ServoController.h"
 #include "NetworkLink.h"
+#include "IAngleSink.h"
 #include "Config.h"
 
 namespace {
@@ -89,12 +91,14 @@ void writePatternParams(JsonObject obj, const PatternParams &p) {
 } // namespace
 
 void WebApi::begin(PlaybackEngine *playback, SequenceStore *sequence, SettingsStore *settingsStore,
-                    ServoController *servo, NetworkLink *network, const IPAddress &apIp) {
+                    ServoController *servo, NetworkLink *network, IAngleSink *angleSink,
+                    const IPAddress &apIp) {
   playback_ = playback;
   sequence_ = sequence;
   settingsStore_ = settingsStore;
   servo_ = servo;
   network_ = network;
+  angleSink_ = angleSink;
 
   dns_.start(DNS_PORT, "*", apIp);
 
@@ -132,7 +136,7 @@ String WebApi::buildStatusJson() {
   JsonDocument doc;
   doc["type"] = "status";
   doc["mode"] = modeToString(playback_->mode());
-  doc["angle"] = servo_->getAngle();
+  doc["angle"] = angleSink_->getAngle();
   doc["uptime_ms"] = millis();
   doc["free_heap"] = ESP.getFreeHeap();
   doc["firmware_version"] = FIRMWARE_VERSION;
@@ -380,6 +384,35 @@ void WebApi::setupRoutes() {
     serializeJson(doc, out);
     request->send(200, "application/json", out);
   });
+
+  server_.on("/api/network/targets", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    JsonDocument doc;
+    doc["broadcast_all"] = angleSink_->targetsBroadcastAll();
+    JsonArray ids = doc["node_ids"].to<JsonArray>();
+    for (size_t i = 0; i < angleSink_->targetCount(); i++) ids.add(angleSink_->targetAt(i));
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
+  // Master only in practice (a no-op on Standalone/Node boards, whose sink
+  // ignores setTargets): picks which Node(s) the Manual tab's jog/pattern
+  // controls currently drive — broadcast to all, or an explicit id list.
+  // Ephemeral (RAM only), not persisted to NVS — resets to "all nodes" on
+  // reboot.
+  server_.addHandler(new AsyncCallbackJsonWebHandler(
+      "/api/network/targets", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        bool broadcastAll = json["broadcast_all"] | true;
+        std::vector<uint8_t> ids;
+        if (json["node_ids"].is<JsonArray>()) {
+          for (JsonVariant v : json["node_ids"].as<JsonArray>()) {
+            int id = v.as<int>();
+            if (id >= 0 && id <= NET_NODE_ID_MAX) ids.push_back(static_cast<uint8_t>(id));
+          }
+        }
+        angleSink_->setTargets(broadcastAll, ids.data(), ids.size());
+        request->send(200, "application/json", "{\"ok\":true}");
+      }));
 
   server_.on("/api/settings/reset", HTTP_POST, [this](AsyncWebServerRequest *request) {
     settingsStore_->factoryDefaults();

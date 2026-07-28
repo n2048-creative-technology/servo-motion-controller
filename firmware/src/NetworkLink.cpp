@@ -11,8 +11,8 @@ namespace {
 // Fine in practice: exactly one NetworkLink is ever constructed (in main.cpp).
 NetworkLink *g_instance = nullptr;
 
-void onRecvTrampoline(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  (void)info;
+void onRecvTrampoline(const uint8_t *mac, const uint8_t *data, int len) {
+  (void)mac;
   if (g_instance) g_instance->onRecv(data, len);
 }
 
@@ -81,7 +81,11 @@ void NetworkLink::recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now) 
     if (freeSlot < 0 && !knownNodes_[i].inUse) freeSlot = i;
   }
   if (freeSlot >= 0) {
-    knownNodes_[freeSlot] = KnownNode{fromNodeId, angleDeg, now, true};
+    KnownNode &slot = knownNodes_[freeSlot];
+    slot.id = fromNodeId;
+    slot.angleDeg = angleDeg;
+    slot.lastSeenMs = now;
+    slot.inUse = true;
   }
 }
 
