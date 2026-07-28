@@ -9,6 +9,7 @@
 #include "SequenceStore.h"
 #include "SettingsStore.h"
 #include "ServoController.h"
+#include "NetworkLink.h"
 #include "Config.h"
 
 namespace {
@@ -20,8 +21,25 @@ const char *modeToString(PlaybackMode mode) {
     case PlaybackMode::RECORDING: return "recording";
     case PlaybackMode::PATTERN: return "pattern";
     case PlaybackMode::SEQUENCE: return "sequence";
+    case PlaybackMode::NETWORK: return "network";
   }
   return "idle";
+}
+
+const char *networkModeToString(OperatingMode mode) {
+  switch (mode) {
+    case OperatingMode::STANDALONE: return "standalone";
+    case OperatingMode::NODE: return "node";
+    case OperatingMode::MASTER: return "master";
+  }
+  return "standalone";
+}
+
+OperatingMode networkModeFromString(const char *s) {
+  if (!s) return OperatingMode::STANDALONE;
+  if (strcmp(s, "node") == 0) return OperatingMode::NODE;
+  if (strcmp(s, "master") == 0) return OperatingMode::MASTER;
+  return OperatingMode::STANDALONE;
 }
 
 const char *patternTypeToString(PatternType type) {
@@ -71,11 +89,12 @@ void writePatternParams(JsonObject obj, const PatternParams &p) {
 } // namespace
 
 void WebApi::begin(PlaybackEngine *playback, SequenceStore *sequence, SettingsStore *settingsStore,
-                    ServoController *servo, const IPAddress &apIp) {
+                    ServoController *servo, NetworkLink *network, const IPAddress &apIp) {
   playback_ = playback;
   sequence_ = sequence;
   settingsStore_ = settingsStore;
   servo_ = servo;
+  network_ = network;
 
   dns_.start(DNS_PORT, "*", apIp);
 
@@ -116,6 +135,7 @@ String WebApi::buildStatusJson() {
   doc["angle"] = servo_->getAngle();
   doc["uptime_ms"] = millis();
   doc["free_heap"] = ESP.getFreeHeap();
+  doc["firmware_version"] = FIRMWARE_VERSION;
 
   JsonObject recording = doc["recording"].to<JsonObject>();
   recording["active"] = playback_->mode() == PlaybackMode::RECORDING;
@@ -270,6 +290,10 @@ void WebApi::setupRoutes() {
                                                                              : "none";
     writePatternParams(autostart["pattern"].to<JsonObject>(), s.autostartPattern);
 
+    JsonObject network = doc["network"].to<JsonObject>();
+    network["mode"] = networkModeToString(s.networkMode);
+    network["node_id"] = s.nodeId;
+
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
@@ -326,9 +350,36 @@ void WebApi::setupRoutes() {
           s.autostartPattern = parsePatternParams(json["autostart"]["pattern"], s.autostartPattern);
         }
 
+        if (json["network"]["mode"].is<const char *>()) {
+          s.networkMode = networkModeFromString(json["network"]["mode"].as<const char *>());
+        }
+        if (json["network"]["node_id"].is<uint8_t>()) {
+          uint8_t id = json["network"]["node_id"].as<uint8_t>();
+          if (id >= NET_NODE_ID_MIN && id <= NET_NODE_ID_MAX) {
+            s.nodeId = id;
+          }
+        }
+
         settingsStore_->save();
         request->send(200, "application/json", "{\"ok\":true}");
       }));
+
+  server_.on("/api/network/nodes", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    JsonDocument doc;
+    JsonArray nodes = doc["nodes"].to<JsonArray>();
+    const KnownNode *known = network_->knownNodes();
+    const uint32_t now = millis();
+    for (uint8_t i = 0; i < NetworkLink::maxKnownNodes(); i++) {
+      if (!known[i].inUse) continue;
+      JsonObject n = nodes.add<JsonObject>();
+      n["id"] = known[i].id;
+      n["angle"] = known[i].angleDeg;
+      n["age_ms"] = now - known[i].lastSeenMs;
+    }
+    String out;
+    serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
 
   server_.on("/api/settings/reset", HTTP_POST, [this](AsyncWebServerRequest *request) {
     settingsStore_->factoryDefaults();

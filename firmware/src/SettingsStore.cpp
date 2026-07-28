@@ -16,6 +16,13 @@ void SettingsStore::factoryDefaults() {
   generateDefaultSsid(settings_.apSsid, sizeof(settings_.apSsid));
   strncpy(settings_.apPassword, AP_DEFAULT_PASSWORD, sizeof(settings_.apPassword) - 1);
   settings_.autostartPattern = PatternParams{};
+
+  // Derive a default node id from the MAC so freshly-flashed boards don't all
+  // collide on id 1 before the user assigns one in Settings.
+  uint8_t mac[6];
+  WiFi.macAddress(mac);
+  uint8_t range = NET_NODE_ID_MAX - NET_NODE_ID_MIN + 1;
+  settings_.nodeId = NET_NODE_ID_MIN + (mac[5] % range);
 }
 
 void SettingsStore::load() {

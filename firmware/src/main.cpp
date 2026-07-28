@@ -8,12 +8,16 @@
 #include "SequenceStore.h"
 #include "PlaybackEngine.h"
 #include "WebApi.h"
+#include "NetworkLink.h"
+#include "SerialBridge.h"
 
 ServoController servo;
 SettingsStore settingsStore;
 SequenceStore sequenceStore;
 PlaybackEngine playback;
 WebApi webApi;
+NetworkLink networkLink;
+SerialBridge serialBridge;
 
 static const IPAddress AP_IP(192, 168, 4, 1);
 static const IPAddress AP_NETMASK(255, 255, 255, 0);
@@ -52,11 +56,15 @@ void setup() {
   playback.begin(&servo, &sequenceStore);
   // Applied before networking comes up: a configured pattern/sequence is
   // already looping with zero user interaction, surviving reset/power-cycle.
-  playback.applyAutostart(settings, millis());
-  if (settings.autostartEnabled) {
-    Serial.printf("[SELFTEST] autostart engaged: mode=%d\n", static_cast<int>(playback.mode()));
-  } else {
-    Serial.println("[SELFTEST] autostart disabled");
+  // Skipped for MASTER boards, which bridge PC<->network commands rather
+  // than driving a locally-attached servo.
+  if (settings.networkMode != OperatingMode::MASTER) {
+    playback.applyAutostart(settings, millis());
+    if (settings.autostartEnabled) {
+      Serial.printf("[SELFTEST] autostart engaged: mode=%d\n", static_cast<int>(playback.mode()));
+    } else {
+      Serial.println("[SELFTEST] autostart disabled");
+    }
   }
 
   WiFi.mode(WIFI_AP);
@@ -67,10 +75,18 @@ void setup() {
   Serial.printf("[SELFTEST] wifi AP %s ssid=%s ip=%s\n", apOk ? "up" : "FAILED", settings.apSsid,
                 WiFi.softAPIP().toString().c_str());
 
-  webApi.begin(&playback, &sequenceStore, &settingsStore, &servo, AP_IP);
+  networkLink.begin(settings.networkMode, settings.nodeId);
+  if (settings.networkMode == OperatingMode::NODE) {
+    networkLink.onNodeCommand([](float angleDeg) { playback.onNetworkCommand(angleDeg, millis()); });
+  } else if (settings.networkMode == OperatingMode::MASTER) {
+    serialBridge.begin(&networkLink);
+  }
+
+  webApi.begin(&playback, &sequenceStore, &settingsStore, &servo, &networkLink, AP_IP);
   Serial.println("[SELFTEST] webserver started, ws clients=0");
 
-  Serial.printf("[SELFTEST] free heap=%u bytes\n", ESP.getFreeHeap());
+  Serial.printf("[SELFTEST] free heap=%u bytes, network mode=%d node_id=%u\n", ESP.getFreeHeap(),
+                static_cast<int>(settings.networkMode), settings.nodeId);
 }
 
 void loop() {
@@ -79,6 +95,12 @@ void loop() {
   if (now - lastTickMs >= TICK_INTERVAL_MS) {
     lastTickMs = now;
     playback.tick(now);
+    networkLink.reportLocalAngle(servo.getAngle());
+  }
+
+  networkLink.loopTick(now);
+  if (settingsStore.settings().networkMode == OperatingMode::MASTER) {
+    serialBridge.loopTick();
   }
 
   webApi.loopTick(now);

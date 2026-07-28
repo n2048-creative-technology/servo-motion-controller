@@ -12,7 +12,8 @@ enum class PlaybackMode : uint8_t {
   MANUAL = 1,
   RECORDING = 2,
   PATTERN = 3,
-  SEQUENCE = 4
+  SEQUENCE = 4,
+  NETWORK = 5  // driven by a wireless CMD from a Master, not the local jog slider
 };
 
 // Decides "what angle should the servo be at right now" for every mode and
@@ -29,6 +30,11 @@ public:
   // Immediate manual move; interrupts PATTERN/SEQUENCE playback but not RECORDING
   // (during recording, jogging is what drives the motion being captured).
   void onJog(float angleDeg, uint32_t now);
+
+  // Immediate move driven by a wireless CMD from a Master (NODE mode only).
+  // Same interrupt semantics as onJog, but tagged as PlaybackMode::NETWORK so
+  // status/UI can distinguish "moved by the network" from local jogging.
+  void onNetworkCommand(float angleDeg, uint32_t now);
 
   void startPattern(const PatternParams &params, uint32_t now);
   void stopPattern();

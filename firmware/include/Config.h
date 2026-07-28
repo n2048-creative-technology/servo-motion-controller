@@ -32,7 +32,7 @@ static constexpr uint16_t SEQUENCE_FILE_VERSION = 1;
 static constexpr const char *NVS_NAMESPACE = "app";
 static constexpr const char *NVS_KEY = "cfg";
 static constexpr uint32_t SETTINGS_MAGIC = 0x53565831; // "1XVS"
-static constexpr uint16_t SETTINGS_VERSION = 1;
+static constexpr uint16_t SETTINGS_VERSION = 2; // v2: added networkMode/nodeId (v1 blobs fall back to defaults)
 
 // ---- WiFi AP defaults ----
 static constexpr const char *AP_SSID_PREFIX = "ServoRig-";
@@ -42,3 +42,16 @@ static constexpr uint8_t AP_WIFI_CHANNEL = 1;
 // ---- Web server ----
 static constexpr uint16_t HTTP_PORT = 80;
 static constexpr uint16_t DNS_PORT = 53;
+
+// ---- Firmware version ----
+static constexpr const char *FIRMWARE_VERSION = "2.0.0";
+
+// ---- Master/Node network (ESP-NOW) ----
+static constexpr uint8_t NET_PACKET_MAGIC = 0xE5;
+static constexpr uint8_t NET_PACKET_VERSION = 1;
+static constexpr uint8_t NET_BROADCAST_NODE = 0; // targetNode value meaning "all nodes"
+static constexpr uint8_t NET_NODE_ID_MIN = 1;
+static constexpr uint8_t NET_NODE_ID_MAX = 250;
+static constexpr uint32_t NET_HELLO_INTERVAL_MS = 1000;  // node -> master heartbeat rate
+static constexpr uint32_t NET_NODE_STALE_MS = 5000;      // drop from master's table if unseen this long
+static constexpr uint8_t NET_MAX_TRACKED_NODES = 32;     // master's known-node table size

@@ -40,8 +40,16 @@ void PlaybackEngine::tick(uint32_t now) {
 
 void PlaybackEngine::onJog(float angleDeg, uint32_t now) {
   servo_->writeAngle(angleDeg);
-  if (mode_ == PlaybackMode::PATTERN || mode_ == PlaybackMode::SEQUENCE || mode_ == PlaybackMode::IDLE) {
+  if (mode_ != PlaybackMode::RECORDING) {
     mode_ = PlaybackMode::MANUAL;
+  }
+  (void)now;
+}
+
+void PlaybackEngine::onNetworkCommand(float angleDeg, uint32_t now) {
+  servo_->writeAngle(angleDeg);
+  if (mode_ != PlaybackMode::RECORDING) {
+    mode_ = PlaybackMode::NETWORK;
   }
   (void)now;
 }
