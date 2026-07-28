@@ -33,7 +33,7 @@ difference(){
     
     translate([-4.3,0,2]) cylinder(d=5,h=10);
     
-translate([-9,0,5]) cylinder(d=18,h=10);
+    translate([-9,0,5]) cylinder(d=18,h=20);
     
     
     translate([36,15]/2) cylinder(d=7,h=19,center=true);
