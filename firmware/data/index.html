@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Servo Rig</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">Servo Rig</div>
+  <div class="statuspill">
+    <span id="wsDot" class="dot dot-off"></span>
+    <span id="modeLabel">--</span>
+    <span id="angleLabel" class="angle">--&deg;</span>
+  </div>
+</header>
+
+<main>
+
+  <section id="tab-manual" class="tab active">
+    <div class="card">
+      <h2>Jog</h2>
+      <input id="jogSlider" type="range" min="0" max="270" step="0.5" value="135" class="jog">
+      <div class="jogreadout"><span id="jogValue">135.0</span>&deg;</div>
+    </div>
+
+    <div class="card">
+      <h2>Pattern</h2>
+      <label class="field">
+        <span>Shape</span>
+        <select id="patternType"></select>
+      </label>
+      <div id="patternParams" class="paramgrid"></div>
+      <div class="btnrow">
+        <button id="patternStart" class="btn btn-go">Start Loop</button>
+        <button id="patternStop" class="btn btn-stop">Stop</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-record" class="tab">
+    <div class="card">
+      <h2>Record Motion</h2>
+      <p class="hint">Start recording, then move the servo with the Manual jog slider on this or another tab. Samples are captured automatically while recording.</p>
+      <div class="recstate">
+        <span id="recDot" class="dot dot-off"></span>
+        <span id="recLabel">idle</span>
+        <span id="recPoints">0 pts</span>
+      </div>
+      <canvas id="recCanvas" width="600" height="120" class="trace"></canvas>
+      <div class="btnrow">
+        <button id="recStart" class="btn btn-go">Start Recording</button>
+        <button id="recStop" class="btn btn-stop">Stop Recording</button>
+      </div>
+      <div class="btnrow">
+        <button id="recSave" class="btn btn-primary">Save</button>
+        <button id="recDiscard" class="btn btn-danger">Discard</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Saved Sequence</h2>
+      <div id="seqInfo" class="hint">no sequence saved</div>
+      <div class="btnrow">
+        <button id="seqPlay" class="btn btn-go">Play Loop</button>
+        <button id="seqStop" class="btn btn-stop">Stop</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>Access Point</h2>
+      <label class="field">
+        <span>SSID</span>
+        <input id="setSsid" type="text" maxlength="32">
+      </label>
+      <label class="field">
+        <span>Password (blank = open network, min 8 chars)</span>
+        <input id="setPassword" type="password" maxlength="64" placeholder="leave blank to keep unchanged">
+      </label>
+      <div class="btnrow">
+        <button id="apSave" class="btn btn-primary">Save AP Settings</button>
+        <button id="rebootBtn" class="btn btn-danger">Reboot</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Servo Calibration</h2>
+      <div class="paramgrid">
+        <label class="field"><span>Min pulse (&micro;s)</span><input id="calMinUs" type="number" step="1"></label>
+        <label class="field"><span>Max pulse (&micro;s)</span><input id="calMaxUs" type="number" step="1"></label>
+        <label class="field"><span>Min angle (&deg;)</span><input id="calMinAngle" type="number" step="0.5"></label>
+        <label class="field"><span>Max angle (&deg;)</span><input id="calMaxAngle" type="number" step="0.5"></label>
+        <label class="field"><span>Center angle (&deg;)</span><input id="calCenterAngle" type="number" step="0.5"></label>
+      </div>
+      <div class="btnrow">
+        <button id="calSave" class="btn btn-primary">Save Calibration</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Autostart on Boot</h2>
+      <label class="field checkfield">
+        <input id="asEnabled" type="checkbox">
+        <span>Enabled</span>
+      </label>
+      <label class="field">
+        <span>Target</span>
+        <select id="asTarget">
+          <option value="none">None</option>
+          <option value="pattern">Pattern</option>
+          <option value="sequence">Recorded sequence</option>
+        </select>
+      </label>
+      <label class="field" id="asPatternTypeField">
+        <span>Pattern shape</span>
+        <select id="asPatternType"></select>
+      </label>
+      <div id="asPatternParams" class="paramgrid"></div>
+      <div class="btnrow">
+        <button id="asSave" class="btn btn-primary">Save Autostart</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Reset</h2>
+      <div class="btnrow">
+        <button id="factoryReset" class="btn btn-danger">Factory Reset</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<nav class="tabbar">
+  <button class="tabbtn active" data-tab="tab-manual">Manual</button>
+  <button class="tabbtn" data-tab="tab-record">Record</button>
+  <button class="tabbtn" data-tab="tab-settings">Settings</button>
+</nav>
+
+<script src="app.js"></script>
+</body>
+</html>
