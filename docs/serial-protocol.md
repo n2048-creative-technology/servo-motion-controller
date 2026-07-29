@@ -94,6 +94,15 @@ rather than misinterpret each other's bytes.
   Network tab. Two Nodes sharing an ID will both react to commands addressed
   to that ID.
 - The Master needs no Node ID and no servo attached — it's a pure bridge.
+- **Every board — Master and all Nodes — needs matching firmware.** Each CMD
+  and HELLO packet carries a `NET_PACKET_VERSION`; a board running an older
+  or newer build than the rest silently drops (and, since this version,
+  logs) every packet from/to it rather than misinterpreting the bytes. A
+  Node that "disappears" from the Master's known-node table despite being
+  powered on and in range — while everything else works — usually means it
+  missed the last firmware update round. Check the Master's serial console
+  for `[NET] ignoring packet with protocol version...` and reflash whatever
+  it names.
 
 ## Example: `pyserial`
 
