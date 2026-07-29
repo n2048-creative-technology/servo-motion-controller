@@ -106,6 +106,10 @@ class App:
         self.angle_entry.grid(row=1, column=1, sticky="w", pady=(8, 0))
         self.angle_entry.bind("<Return>", lambda e: self._send_command())
 
+        # Created before the Scale below: setting its initial value fires
+        # `command` immediately, and _on_scale_move reads live_jog_var.
+        self.live_jog_var = tk.BooleanVar(value=False)
+
         self.angle_scale = ttk.Scale(
             send, from_=0, to=270, orient="horizontal", command=self._on_scale_move
         )
@@ -113,7 +117,6 @@ class App:
         self.angle_scale.grid(row=1, column=2, columnspan=3, sticky="ew", pady=(8, 0))
         send.columnconfigure(4, weight=1)
 
-        self.live_jog_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             send, text="Live jog while dragging (throttled ~25 Hz)", variable=self.live_jog_var
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))

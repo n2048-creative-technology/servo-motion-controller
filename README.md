@@ -89,12 +89,21 @@ Three tabs, reachable from the bottom nav:
 
 - **Manual** — jog slider (live, ~25 Hz over WebSocket) + pattern picker with
   generated parameter fields and Start/Stop.
+
+  <img src="images/webui-manual.png" alt="Manual tab: jog slider and pattern picker" width="300">
+
 - **Record** — start/stop recording (captures the servo's position at a
   fixed 20 Hz while you jog it), live trace, save/discard, and play/stop the
   saved sequence on a loop.
-- **Settings** — AP SSID/password, servo calibration, autostart
-  enable/target (pattern or sequence) with its own parameter fields, and a
-  factory-reset button.
+
+  <img src="images/webui-record.png" alt="Record tab: recording controls and saved sequence" width="300">
+
+- **Settings** — AP SSID/password, servo calibration (including **Invert
+  direction**, for a servo mounted mirrored/reversed relative to its
+  calibrated min/max angle), autostart enable/target (pattern or sequence)
+  with its own parameter fields, and a factory-reset button.
+
+  <img src="images/webui-settings-calibration.png" alt="Settings tab: AP, servo calibration with invert checkbox" width="300">
 
 ## REST / WebSocket API
 
@@ -107,6 +116,10 @@ accepts `{"cmd":"jog","angle":123.4}` for low-latency manual moves.
 Every board still runs the same firmware and, by default, is exactly the
 self-contained single-servo rig described above (**Standalone** mode). On top
 of that, a board can be switched (Settings → Network) into:
+
+Settings → Network, all three modes:
+
+<img src="images/webui-network-standalone.png" alt="Network settings: Standalone mode" width="260"> <img src="images/webui-network-node.png" alt="Network settings: Node mode with Node ID field" width="260"> <img src="images/webui-network-master.png" alt="Network settings: Master mode with known-nodes table" width="260">
 
 - **Node** — everything Standalone does, plus a **Node ID** (1–250) and an
   ESP-NOW listener: it accepts wireless positioning commands from a Master in
@@ -127,15 +140,22 @@ of that, a board can be switched (Settings → Network) into:
   for driving the rig by hand from a phone without any PC involved at all;
   the serial bridge above is for scripted/external control.
 
+  <img src="images/webui-manual-master-target.png" alt="Master's Manual tab: Target card with node checkboxes" width="300">
+
   For PC-driven control there's also [scripts-tools/master_gui.py](scripts-tools/master_gui.py),
   a small Tkinter app that connects to a Master's serial port, shows its known
   Nodes, and lets you jog/send positions to a selection of them (or broadcast
-  to all) without writing any code, and
-  [scripts-tools/joystick_master_gui.py](scripts-tools/joystick_master_gui.py),
+  to all) without writing any code:
+
+  <img src="images/pytool-master-gui.png" alt="master_gui.py: serial connection, known-nodes table, send controls" width="420">
+
+  and [scripts-tools/joystick_master_gui.py](scripts-tools/joystick_master_gui.py),
   which links a physical joystick/gamepad's axes to Nodes (with a "learn the
   axis" calibration step), streams live movement to them, and can record a
   performance to CSV (Node ID + angle per timestamp) for standalone replay
   without the controller — see [scripts-tools/README.md](scripts-tools/README.md).
+
+  <img src="images/pytool-joystick-gui.png" alt="joystick_master_gui.py: controller detected, axis readout, mapping table" width="420">
 
 How it works: Master and Nodes talk over **ESP-NOW** (direct ESP32-to-ESP32
 radio, no router involved), broadcasting on the same fixed AP WiFi channel
@@ -175,15 +195,27 @@ on it where that's not true.
   ceiling, look at a non-OTA partition table (`board_build.partitions`) to
   reclaim the unused second OTA app slot.
 - Master/Node mode (v2) is build-verified (`pio run` / `-t buildfs` both
-  succeed) and one board has been flashed and boot-confirmed over serial in
-  this environment, but the actual ESP-NOW link between a Master and a Node
-  (a real serial or web-UI command moving a *remote* servo) hasn't been
-  hands-on verified end-to-end yet — flash a second board as a Node with a
-  chosen Node ID and confirm it responds before relying on this in the field.
-- The `scripts-tools/` PC GUIs are only syntax-checked and, for
-  `joystick_master_gui.py`, logic-tested (axis-mapping math, CSV round-trip)
-  in this sandbox — no display server (no Xvfb) and no physical
-  controller attached, so neither Tkinter window has been visually driven,
-  and the pygame joystick path has never seen a real device. Worth a manual
-  run of both before relying on them for a show.
+  succeed) and all 4 boards on hand have been flashed and boot-confirmed over
+  serial (settings v3, LittleFS OK, AP up), but the actual ESP-NOW link
+  between a Master and a Node (a real serial or web-UI command moving a
+  *remote* servo) hasn't been hands-on verified end-to-end yet — this
+  environment has no WiFi adapter to join a board's AP and drive its web UI
+  over the air. Set one board to Master / another to Node with a chosen Node
+  ID and confirm it responds before relying on this in the field. Note also
+  that bumping `SETTINGS_VERSION` (for the new invert field) resets any
+  previously-configured Master/Node role back to Standalone on reflash — a
+  documented, intentional fallback, not a bug, but it means re-picking
+  Mode/Node ID after this update.
+- The web UI screenshots above were captured by serving `firmware/data/`
+  through a local mock API (canned JSON standing in for the ESP32's
+  responses) and driving a real headless Chromium over it — real rendering
+  and JS logic, but not the actual ESP32 backend or WiFi AP.
+- The `scripts-tools/` PC GUIs were actually launched on a real X display for
+  these screenshots (not just syntax-checked) — which caught a real bug in
+  `master_gui.py` (a callback referenced `live_jog_var` before it was created,
+  crashing on the first slider draw; now fixed) and confirmed
+  `joystick_master_gui.py` correctly detects a real controller and gates the
+  streaming checkbox until a mapping exists. Still not exercised: an actual
+  Master serial connection or live streaming/recording session with hardware
+  end-to-end.
 # servo-motion-controller
