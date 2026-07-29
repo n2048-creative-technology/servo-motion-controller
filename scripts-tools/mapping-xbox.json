@@ -1,0 +1,23 @@
+{
+  "controller_name": "Generic X-Box pad",
+  "mappings": [
+    {
+      "axis_index": 3,
+      "raw_min": -1.0,
+      "raw_max": 0.999969482421875,
+      "node_id": 1,
+      "angle_min": 0.0,
+      "angle_max": 270.0,
+      "invert": false
+    },
+    {
+      "axis_index": 4,
+      "raw_min": -1.0,
+      "raw_max": 0.999969482421875,
+      "node_id": 2,
+      "angle_min": 0.0,
+      "angle_max": 270.0,
+      "invert": false
+    }
+  ]
+}

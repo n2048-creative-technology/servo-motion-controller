@@ -55,3 +55,16 @@ static constexpr uint8_t NET_NODE_ID_MAX = 250;
 static constexpr uint32_t NET_HELLO_INTERVAL_MS = 1000;  // node -> master heartbeat rate
 static constexpr uint32_t NET_NODE_STALE_MS = 5000;      // drop from master's table if unseen this long
 static constexpr uint8_t NET_MAX_TRACKED_NODES = 32;     // master's known-node table size
+
+// Master: re-broadcasts the last angle sent to each target at least this
+// often, regardless of whether it actually changed. Self-heals a target that
+// missed its most recent CMD (e.g. dropped during radio contention from a
+// phone joining a Node's AP) without needing a reboot or a new movement to
+// trigger a fresh send.
+static constexpr uint32_t NET_CMD_RESEND_INTERVAL_MS = 300;
+static constexpr uint8_t NET_MAX_LAST_COMMANDS = 16; // distinct targets (node ids or broadcast) tracked for resend
+
+// Node: periodically re-applies the last commanded angle to the servo, so a
+// missed update is corrected as soon as ESP-NOW recovers rather than the
+// board sitting at a stale position indefinitely.
+static constexpr uint32_t SERVO_REAPPLY_INTERVAL_MS = 250;

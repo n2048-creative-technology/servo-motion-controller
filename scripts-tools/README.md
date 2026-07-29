@@ -91,7 +91,9 @@ Workflow:
 6. **Load CSV…** + **Play** replays a recording by sending `{"node":
    <id>, "angle": ...}` at the original relative timing — no controller
    needed at all, so a captured performance can be replayed standalone.
-   **Loop** repeats it; **Stop** cancels mid-playback.
+   **Loop** repeats it; **Stop** cancels mid-playback. **Speed** (0.1–2.0,
+   default 1.0) scales the timing between rows — 0.5 plays back at half
+   speed (slower), 2.0 at double speed — without touching the CSV itself.
 
 Not hands-on verified in the sandbox this was built in (no display server,
 no physical controller attached) — the axis-mapping math and CSV

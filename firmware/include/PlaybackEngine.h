@@ -58,5 +58,6 @@ private:
   PlaybackMode mode_ = PlaybackMode::IDLE;
   uint32_t modeStartMs_ = 0;
   uint32_t lastRecordCaptureMs_ = 0;
+  uint32_t lastReapplyMs_ = 0;
   PatternParams activePattern_;
 };

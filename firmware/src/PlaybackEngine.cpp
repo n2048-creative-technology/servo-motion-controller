@@ -12,8 +12,18 @@ void PlaybackEngine::begin(IAngleSink *sink, SequenceStore *sequence) {
 void PlaybackEngine::tick(uint32_t now) {
   switch (mode_) {
     case PlaybackMode::IDLE:
+      break;
+
     case PlaybackMode::MANUAL:
-      // Servo holds whatever angle was last commanded; nothing to do.
+    case PlaybackMode::NETWORK:
+      // The servo's PWM already holds whatever angle was last commanded in
+      // hardware, but periodically re-write it anyway: cheap insurance that
+      // self-heals a Node back to the right position on its own (no fresh
+      // jog/network command required) if anything ever left it out of sync.
+      if (now - lastReapplyMs_ >= SERVO_REAPPLY_INTERVAL_MS) {
+        lastReapplyMs_ = now;
+        servo_->writeAngle(servo_->getAngle());
+      }
       break;
 
     case PlaybackMode::RECORDING:

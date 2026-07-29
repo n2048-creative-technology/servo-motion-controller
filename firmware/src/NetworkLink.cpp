@@ -48,26 +48,64 @@ void NetworkLink::begin(OperatingMode mode, uint8_t nodeId) {
 }
 
 void NetworkLink::loopTick(uint32_t now) {
-  if (!espNowReady_ || mode_ != OperatingMode::NODE) return;
+  if (!espNowReady_) return;
 
-  if (now - lastHelloMs_ >= NET_HELLO_INTERVAL_MS) {
+  if (mode_ == OperatingMode::NODE && now - lastHelloMs_ >= NET_HELLO_INTERVAL_MS) {
     lastHelloMs_ = now;
     NetPacket pkt;
     pkt.type = NET_PACKET_TYPE_HELLO;
     pkt.nodeId = nodeId_;
     pkt.angleDeg = localAngle_;
     esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+  } else if (mode_ == OperatingMode::MASTER) {
+    resendDueCommands(now);
   }
 }
 
-bool NetworkLink::sendCommand(uint8_t targetNode, float angleDeg) {
-  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
-
+bool NetworkLink::transmitCommand(uint8_t targetNode, float angleDeg) {
   NetPacket pkt;
   pkt.type = NET_PACKET_TYPE_CMD;
   pkt.targetNode = targetNode;
   pkt.angleDeg = angleDeg;
   return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::sendCommand(uint8_t targetNode, float angleDeg) {
+  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
+  const bool ok = transmitCommand(targetNode, angleDeg);
+  if (ok) recordLastCommand(targetNode, angleDeg, millis());
+  return ok;
+}
+
+void NetworkLink::recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t now) {
+  int freeSlot = -1;
+  for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
+    if (lastCommands_[i].inUse && lastCommands_[i].targetNode == targetNode) {
+      lastCommands_[i].angleDeg = angleDeg;
+      lastCommands_[i].lastSentMs = now;
+      return;
+    }
+    if (freeSlot < 0 && !lastCommands_[i].inUse) freeSlot = i;
+  }
+  // Table full and this is a never-before-seen target: reuse slot 0 rather
+  // than dropping the update silently. Distinct concurrent targets beyond
+  // NET_MAX_LAST_COMMANDS aren't expected in practice (one per Node/broadcast).
+  const int slot = freeSlot >= 0 ? freeSlot : 0;
+  lastCommands_[slot].targetNode = targetNode;
+  lastCommands_[slot].angleDeg = angleDeg;
+  lastCommands_[slot].lastSentMs = now;
+  lastCommands_[slot].inUse = true;
+}
+
+void NetworkLink::resendDueCommands(uint32_t now) {
+  for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
+    LastCommand &cmd = lastCommands_[i];
+    if (!cmd.inUse) continue;
+    if (now - cmd.lastSentMs >= NET_CMD_RESEND_INTERVAL_MS) {
+      transmitCommand(cmd.targetNode, cmd.angleDeg);
+      cmd.lastSentMs = now;
+    }
+  }
 }
 
 void NetworkLink::recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now) {

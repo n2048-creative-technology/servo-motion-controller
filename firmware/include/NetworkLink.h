@@ -28,6 +28,16 @@ struct KnownNode {
   bool inUse = false;
 };
 
+// Master: the last angle sent to a given target (a specific node id, or 0
+// for "all nodes"), so it can be periodically re-sent — see
+// NET_CMD_RESEND_INTERVAL_MS.
+struct LastCommand {
+  uint8_t targetNode = 0;
+  float angleDeg = 0.0f;
+  uint32_t lastSentMs = 0;
+  bool inUse = false;
+};
+
 // ESP-NOW transport shared by MASTER and NODE roles. Must be started only
 // after WiFi (the board's own AP) is already up, since ESP-NOW rides on top
 // of the WiFi driver and needs a fixed channel to reach other boards.
@@ -37,7 +47,9 @@ public:
   void begin(OperatingMode mode, uint8_t nodeId);
 
   // Call every loop() iteration. Sends the periodic HELLO heartbeat in NODE
-  // mode; no-op otherwise (receiving happens via ESP-NOW's own callback).
+  // mode, and in MASTER mode re-sends any target's last command that's
+  // overdue for a refresh (see NET_CMD_RESEND_INTERVAL_MS); receiving
+  // happens via ESP-NOW's own callback either way.
   void loopTick(uint32_t now);
 
   // NODE only: feed the servo's actual current angle each loop() so the
@@ -64,8 +76,12 @@ private:
 
   std::function<void(float angleDeg)> nodeCommandCb_;
   KnownNode knownNodes_[NET_MAX_TRACKED_NODES];
+  LastCommand lastCommands_[NET_MAX_LAST_COMMANDS];
 
   void recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now);
+  void recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t now);
+  bool transmitCommand(uint8_t targetNode, float angleDeg);
+  void resendDueCommands(uint32_t now);
 
 public:
   // Called from the ESP-NOW C callback trampoline; not part of the public

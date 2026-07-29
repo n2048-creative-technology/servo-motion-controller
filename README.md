@@ -171,6 +171,19 @@ ESP-NOW traffic on the same channel with a colliding Node ID could also drive
 a Node. Fine for a single installation's private RF environment; don't rely
 on it where that's not true.
 
+**Dropped packets self-heal.** A Node's radio/CPU is shared with whatever
+else it's doing — e.g. a phone joining that same Node's AP to view its web
+UI competes with ESP-NOW for airtime on the single RISC-V core. Rather than
+a dropped command leaving a Node stuck, the Master re-sends the last angle
+it sent to each target at least every 300ms even if unchanged, and each Node
+independently re-applies its own last commanded angle to the servo at least
+every 250ms — see `NET_CMD_RESEND_INTERVAL_MS`/`SERVO_REAPPLY_INTERVAL_MS` in
+`firmware/include/Config.h`. Whichever command reached a Node *last* (local
+jog, another app, a gamepad stream) always wins; if a gamepad moves faster
+than packets can be delivered, intermediate positions may be skipped but the
+Node reliably converges on the final position once movement stops. See
+[docs/serial-protocol.md](docs/serial-protocol.md) for the full picture.
+
 ## Storage
 
 - Servo calibration, AP credentials, and autostart config live in NVS
@@ -206,6 +219,13 @@ on it where that's not true.
   previously-configured Master/Node role back to Standalone on reflash — a
   documented, intentional fallback, not a bug, but it means re-picking
   Mode/Node ID after this update.
+- The command-resend/reapply robustness mechanisms (see above) are
+  build-verified only — reproducing the actual failure mode (a phone joined
+  to a Node's AP while a gamepad drives it through the Master) needs real
+  hardware, a real phone, and a real gamepad simultaneously, none of which
+  this sandbox has all at once. Worth confirming in the field that a Node
+  recovers on its own within ~300-550ms of the interference easing, without
+  needing a reboot.
 - The web UI screenshots above were captured by serving `firmware/data/`
   through a local mock API (canned JSON standing in for the ESP32's
   responses) and driving a real headless Chromium over it — real rendering

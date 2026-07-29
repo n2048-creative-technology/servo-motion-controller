@@ -24,7 +24,12 @@
       "Bash(cp /home/mauricio/webui_shots_tmp/settings-standalone.png /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/images/webui-settings-calibration.png)",
       "Bash(cp /home/mauricio/webui_shots_tmp/settings-network-standalone.png /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/images/webui-network-standalone.png)",
       "Bash(cp /home/mauricio/webui_shots_tmp/settings-network-node.png /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/images/webui-network-node.png)",
-      "Bash(python3 -m py_compile master_gui.py joystick_master_gui.py serial_link.py)"
+      "Bash(python3 -m py_compile master_gui.py joystick_master_gui.py serial_link.py)",
+      "Bash(pio run *)",
+      "Bash(python3 -m py_compile joystick_master_gui.py)",
+      "Bash(ls /dev/ttyACM* 2>&1)",
+      "Read(//dev/**)",
+      "Bash(python3 /home/mauricio/.platformio/packages/tool-esptoolpy/esptool.py --port /dev/ttyACM3 --no-stub --baud 115200 chip_id)"
     ]
   }
 }

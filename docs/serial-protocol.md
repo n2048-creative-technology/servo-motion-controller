@@ -37,6 +37,29 @@ Returns the Master's in-RAM table of Nodes it has heard a heartbeat from
 
 Every reply is also one line, `\n`-terminated.
 
+## Robustness against dropped packets
+
+ESP-NOW has no delivery guarantee, and a Node's radio/CPU is shared with
+whatever else it's doing — e.g. a phone joining that Node's own AP to view
+its web UI competes for airtime/CPU with ESP-NOW on the same single core.
+Two mechanisms make this self-healing instead of silently getting stuck:
+
+- **Master**: remembers the last angle sent to each target (a specific Node
+  id, or the broadcast target) and re-sends it at least every
+  `NET_CMD_RESEND_INTERVAL_MS` (300 ms by default), even if nothing changed.
+  A command that gets dropped in transit is corrected by the next periodic
+  resend without needing a new movement to trigger it.
+- **Node**: independently of receiving anything new, re-applies its last
+  commanded angle to the servo at least every `SERVO_REAPPLY_INTERVAL_MS`
+  (250 ms by default).
+
+Net effect: whichever command — local jog, another app's command, or a
+gamepad's stream — reached a Node *last* always wins and keeps winning, and
+if the gamepad moves faster than packets can be delivered, intermediate
+positions may be skipped but the Node reliably converges on the final
+position once movement stops (see `firmware/include/Config.h` for both
+constants).
+
 ## Requirements for this to work
 
 - Every board that should talk to each other (Master + all its Nodes) must

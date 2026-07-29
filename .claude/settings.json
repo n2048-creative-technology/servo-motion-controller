@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pio run *)",
+      "Bash(ls /dev/ttyACM* 2>&1)",
+      "Read(//dev/**)",
+      "Bash(python3 -)"
+    ]
+  }
+}

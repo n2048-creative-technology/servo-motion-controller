@@ -39,6 +39,8 @@ ANGLE_SEND_EPSILON = 0.2  # degrees; skip a resend below this delta
 DEFAULT_ANGLE_MIN = 0.0
 DEFAULT_ANGLE_MAX = 270.0
 MAX_LOG_LINES = 500
+PLAYBACK_SPEED_MIN = 0.1
+PLAYBACK_SPEED_MAX = 2.0
 
 
 class AxisMapping:
@@ -392,9 +394,15 @@ class App:
         ttk.Checkbutton(rec, text="Loop playback", variable=self.loop_var).grid(
             row=1, column=3, sticky="w", padx=(16, 0), pady=(6, 0)
         )
+        ttk.Label(rec, text="Speed:").grid(row=1, column=4, sticky="w", padx=(16, 0), pady=(6, 0))
+        self.speed_var = tk.DoubleVar(value=1.0)
+        ttk.Spinbox(
+            rec, from_=PLAYBACK_SPEED_MIN, to=PLAYBACK_SPEED_MAX, increment=0.1,
+            textvariable=self.speed_var, width=6,
+        ).grid(row=1, column=5, sticky="w", padx=(4, 0), pady=(6, 0))
         self.playback_status_var = tk.StringVar(value="no CSV loaded")
         ttk.Label(rec, textvariable=self.playback_status_var, foreground="#666").grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0)
+            row=2, column=0, columnspan=6, sticky="w", pady=(6, 0)
         )
 
         log_frame = ttk.LabelFrame(self.root, text="Serial log", padding=8)
@@ -659,7 +667,8 @@ class App:
 
         next_index = self.playback_index + 1
         if next_index < len(self.playback_rows):
-            delay_ms = max(1, self.playback_rows[next_index][0] - t_ms)
+            raw_delay_ms = self.playback_rows[next_index][0] - t_ms
+            delay_ms = max(1, int(raw_delay_ms / self._playback_speed()))
             self.playback_index = next_index
             self._playback_job = self.root.after(delay_ms, self._send_playback_row)
         elif self.loop_var.get():
@@ -667,6 +676,13 @@ class App:
             self._playback_job = self.root.after(1, self._send_playback_row)
         else:
             self._log("-- playback finished --")
+
+    def _playback_speed(self):
+        try:
+            speed = float(self.speed_var.get())
+        except (tk.TclError, ValueError):
+            speed = 1.0
+        return min(PLAYBACK_SPEED_MAX, max(PLAYBACK_SPEED_MIN, speed))
 
     def _stop_playback(self):
         if self._playback_job is not None:
