@@ -3,7 +3,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <esp_random.h>
 #include <string.h>
+#include <cmath>
 
 namespace {
 // esp_now_register_recv_cb takes a plain function pointer, so a single
@@ -43,6 +45,12 @@ void NetworkLink::begin(OperatingMode mode, uint8_t nodeId) {
 
   esp_now_register_recv_cb(onRecvTrampoline);
   espNowReady_ = true;
+
+  if (mode_ == OperatingMode::MASTER) {
+    sessionId_ = esp_random();
+    nextSeq_ = 0;
+  }
+
   Serial.printf("[NET] esp-now ready, role=%s node_id=%u\n",
                 mode_ == OperatingMode::MASTER ? "master" : "node", nodeId_);
 }
@@ -67,6 +75,8 @@ bool NetworkLink::transmitCommand(uint8_t targetNode, float angleDeg) {
   pkt.type = NET_PACKET_TYPE_CMD;
   pkt.targetNode = targetNode;
   pkt.angleDeg = angleDeg;
+  pkt.sessionId = sessionId_;
+  pkt.seq = nextSeq_++;
   return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
 }
 
@@ -138,8 +148,21 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
   if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_HELLO) {
     recordHello(pkt.nodeId, pkt.angleDeg, now);
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_CMD) {
-    if (pkt.targetNode == NET_BROADCAST_NODE || pkt.targetNode == nodeId_) {
-      if (nodeCommandCb_) nodeCommandCb_(pkt.angleDeg);
-    }
+    if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
+    if (!isfinite(pkt.angleDeg)) return; // corrupted/garbage payload: never let this reach the servo
+
+    // Reject anything older than the last command we already applied, so a
+    // resend or retransmit that got delayed in transit can't yank the servo
+    // back to a stale angle after a fresher one already arrived. A changed
+    // sessionId means the Master rebooted (its seq restarted from 0), so
+    // that always wins over whatever session we'd been tracking.
+    const bool newSession = !haveSession_ || pkt.sessionId != lastSessionId_;
+    const bool newerInSession = !newSession && (int32_t)(pkt.seq - lastAppliedSeq_) > 0;
+    if (!newSession && !newerInSession) return;
+
+    haveSession_ = true;
+    lastSessionId_ = pkt.sessionId;
+    lastAppliedSeq_ = pkt.seq;
+    if (nodeCommandCb_) nodeCommandCb_(pkt.angleDeg);
   }
 }

@@ -1,5 +1,6 @@
 #include "ServoController.h"
 #include "Config.h"
+#include <cmath>
 
 void ServoController::begin(uint8_t pin, uint16_t minUs, uint16_t maxUs, float minAngle, float maxAngle,
                              bool invert) {
@@ -22,6 +23,11 @@ void ServoController::begin(uint8_t pin, uint16_t minUs, uint16_t maxUs, float m
 
 void ServoController::writeAngle(float degrees) {
   if (!attached_) return;
+  // clampValue() can't rescue a NaN (every comparison against NaN is false,
+  // so it falls through unclamped) and casting a non-finite float to int
+  // downstream is undefined behavior — reject it here and hold the last
+  // known-good position rather than risk a garbage pulse width.
+  if (!isfinite(degrees)) return;
   const float clamped = clampValue(degrees, minAngle_, maxAngle_);
   currentAngle_ = clamped;
 

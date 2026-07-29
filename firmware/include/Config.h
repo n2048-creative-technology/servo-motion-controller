@@ -10,7 +10,15 @@ static inline T clampValue(T value, T lo, T hi) {
 }
 
 // ---- Servo ----
+// Same silkscreen pin (D10) on both boards, but it's wired to a different
+// GPIO: the XIAO ESP32S3 pins D10/D9 are swapped relative to the ESP32C3
+// (D10=GPIO9 on the S3 vs D10=GPIO10 on the C3). Selecting by GPIO number
+// instead would move the servo signal to a different physical pin per board.
+#if defined(ARDUINO_XIAO_ESP32S3)
+static constexpr uint8_t SERVO_PIN = 9; // XIAO ESP32S3 D10 / GPIO9
+#else
 static constexpr uint8_t SERVO_PIN = 10; // XIAO ESP32C3 D10 / GPIO10
+#endif
 static constexpr uint16_t SERVO_DEFAULT_MIN_US = 500;
 static constexpr uint16_t SERVO_DEFAULT_MAX_US = 2500;
 static constexpr float SERVO_DEFAULT_MIN_ANGLE = 0.0f;
@@ -48,7 +56,7 @@ static constexpr const char *FIRMWARE_VERSION = "2.0.0";
 
 // ---- Master/Node network (ESP-NOW) ----
 static constexpr uint8_t NET_PACKET_MAGIC = 0xE5;
-static constexpr uint8_t NET_PACKET_VERSION = 1;
+static constexpr uint8_t NET_PACKET_VERSION = 2; // v2: added sessionId/seq (stale/out-of-order CMD rejection)
 static constexpr uint8_t NET_BROADCAST_NODE = 0; // targetNode value meaning "all nodes"
 static constexpr uint8_t NET_NODE_ID_MIN = 1;
 static constexpr uint8_t NET_NODE_ID_MAX = 250;

@@ -9,6 +9,14 @@
 // Fixed-size POD sent raw over ESP-NOW (well under its 250-byte payload cap).
 // CMD: Master -> Node(s), addressed by targetNode (0 = broadcast to all).
 // HELLO: Node -> Master heartbeat, carries the sender's own id + angle.
+//
+// sessionId/seq (CMD only) let a Node tell a stale/delayed packet apart from
+// the current one: sessionId is randomized once when a Master boots, seq
+// increments on every CMD it sends (fresh commands and periodic resends
+// alike). Without this, a resend queued before a fresher command but
+// delivered after it (plausible once the radio link is degraded/congested —
+// exactly when resends are most likely to matter) would yank the servo back
+// to a stale angle instead of being ignored.
 struct NetPacket {
   uint8_t magic = NET_PACKET_MAGIC;
   uint8_t version = NET_PACKET_VERSION;
@@ -16,6 +24,8 @@ struct NetPacket {
   uint8_t targetNode = 0;  // CMD only: 0=all nodes, else specific node id
   uint8_t nodeId = 0;      // HELLO only: sender's own node id
   float angleDeg = 0.0f;   // CMD: target angle / HELLO: current angle
+  uint32_t sessionId = 0;  // CMD only: randomized per Master boot
+  uint32_t seq = 0;        // CMD only: monotonically increasing per session
 };
 
 static constexpr uint8_t NET_PACKET_TYPE_CMD = 1;
@@ -73,6 +83,16 @@ private:
   uint32_t lastHelloMs_ = 0;
   float localAngle_ = 0.0f;
   bool espNowReady_ = false;
+
+  // Master: identifies this boot so a Node can tell "Master rebooted, seq
+  // restarted from 0" apart from "this is just a stale/reordered packet".
+  uint32_t sessionId_ = 0;
+  uint32_t nextSeq_ = 0;
+
+  // Node: highest (sessionId, seq) applied so far, to reject anything older.
+  uint32_t lastSessionId_ = 0;
+  uint32_t lastAppliedSeq_ = 0;
+  bool haveSession_ = false;
 
   std::function<void(float angleDeg)> nodeCommandCb_;
   KnownNode knownNodes_[NET_MAX_TRACKED_NODES];
