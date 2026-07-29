@@ -1,8 +1,9 @@
-# Servo Motion Controller (XIAO ESP32C3)
+# Servo Motion Controller (XIAO ESP32C3 / ESP32S3)
 
-A self-contained servo motion sequencer for a Seeed XIAO ESP32C3, powered over
-USB-C. On boot it creates its own WiFi access point and hosts a mobile-first
-web app (open the AP's IP in a phone browser, WLED-style) for:
+A self-contained servo motion sequencer for a Seeed XIAO ESP32C3 **or**
+ESP32S3, powered over USB-C. On boot it creates its own WiFi access point and
+hosts a mobile-first web app (open the AP's IP in a phone browser, WLED-style)
+for:
 
 - Live manual jogging of the servo with a slider.
 - Parametric motion patterns — sine, square, triangle, sawtooth, trapezoid —
@@ -16,11 +17,23 @@ web app (open the AP's IP in a phone browser, WLED-style) for:
 
 ## Hardware
 
+Two supported boards, one firmware — pick the matching PlatformIO
+environment (`seeed_xiao_esp32c3` or `seeed_xiao_esp32s3`) when building/flashing.
+
+| | XIAO ESP32C3 | XIAO ESP32S3 |
+|---|---|---|
+| Power | USB-C (5V from host/charger) | USB-C (5V from host/charger) |
+| Servo signal | **pin D10 (GPIO10)** → servo signal wire | **pin D10 (GPIO9)** → servo signal wire |
+| Flash / RAM | 4MB / ~400KB SRAM | 8MB / ~512KB SRAM |
+
+Both boards use the **same silkscreen-labeled pin D10** for the servo signal
+— no wiring changes needed when switching boards — but note it's a
+*different underlying GPIO number* on each (`SERVO_PIN` in
+`firmware/include/Config.h` is selected per-board via `ARDUINO_XIAO_ESP32S3`,
+already handled for you).
+
 | | |
 |---|---|
-| Board | Seeed XIAO ESP32C3 |
-| Power | USB-C (5V from host/charger) |
-| Servo signal | **GPIO10 / pin D10** → servo signal wire |
 | Servo power | **Do not power the servo from the XIAO's 3V3/5V pin if it draws more than ~500mA.** Use a separate 5–6V supply for the servo, with its ground tied to the XIAO's GND. |
 | Servo pulse range | Default 500–2500 µs, calibratable in Settings (min/max pulse, min/max angle, center) |
 
@@ -50,36 +63,42 @@ Requires [PlatformIO](https://platformio.org/) (`pio` CLI).
 
 ```bash
 cd firmware
-pio run -e seeed_xiao_esp32c3              # compile firmware
-pio run -e seeed_xiao_esp32c3 -t buildfs   # build the LittleFS web UI image
+ENV=seeed_xiao_esp32c3   # or seeed_xiao_esp32s3
+pio run -e $ENV              # compile firmware
+pio run -e $ENV -t buildfs   # build the LittleFS web UI image
 
 # with the board connected over USB-C:
-pio run -e seeed_xiao_esp32c3 -t upload -t uploadfs
-pio device monitor -e seeed_xiao_esp32c3 -b 115200
+pio run -e $ENV -t upload -t uploadfs
+pio device monitor -e $ENV -b 115200
 ```
 
 Both `firmware.bin` and the LittleFS image (`index.html`/`app.js`/`style.css`
 in `firmware/data/`) must be flashed — `uploadfs` pushes the web UI, `upload`
 pushes the firmware. Re-run `uploadfs` any time you edit files in `data/`.
 
-**Native USB-CDC quirk on this board**: on this XIAO ESP32C3, `esptool`'s
+**Native USB-CDC quirk on the XIAO ESP32C3**: on this board, `esptool`'s
 default post-connect baud-rate change (and the RAM-stub handoff) failed
 consistently over the native USB-CDC/JTAG port (`No serial data received`
 after "Stub running..."). Fixed by pinning `upload_speed = 115200` and
-`upload_flags = --no-stub` in `platformio.ini` (already set) — `--no-stub`
-talks to the ROM bootloader directly instead of handing off to a RAM stub,
-which is slower per-byte but reliable over this port. If you flash from a
-different machine/OS and hit the same error, that's the first thing to try;
-if your setup doesn't need it, it's harmless to leave in.
+`upload_flags = --no-stub` for that environment in `platformio.ini` (already
+set) — `--no-stub` talks to the ROM bootloader directly instead of handing
+off to a RAM stub, which is slower per-byte but reliable over this port. If
+you flash from a different machine/OS and hit the same error, that's the
+first thing to try; if your setup doesn't need it, it's harmless to leave
+in. **The XIAO ESP32S3 hasn't shown this issue** — it uploads fine with
+PlatformIO's defaults (460800 baud, stub), so no equivalent override is set
+for that environment; add one the same way if you ever hit it there.
 
-Verified end-to-end on real hardware: firmware and filesystem both flashed
-successfully to a connected XIAO ESP32C3 (`/dev/ttyACM0`), and the serial
-self-test log confirmed a clean boot — settings loaded, servo attached on
-GPIO10, LittleFS mounted, WiFi AP up (`ServoRig-xxxxxx` @ `192.168.4.1`),
-web server started, ~195KB free heap. **Not verified**: the web UI and API
-themselves, since this environment has no WiFi adapter to join the AP and
-exercise `/api/*` or the WebSocket over the air — connect a phone or laptop
-to the AP and walk through [docs/self-test.md](docs/self-test.md)'s
+Verified end-to-end on real hardware, both boards: firmware and filesystem
+flashed successfully to a connected XIAO ESP32C3 and a connected XIAO
+ESP32S3, and each one's serial self-test log confirmed a clean boot —
+settings loaded, servo attached on the correct pin (GPIO10 on the C3, GPIO9
+on the S3 — both are silkscreen pin D10), LittleFS mounted, WiFi AP up
+(`ServoRig-xxxxxx` @ `192.168.4.1`), web server started (~195KB free heap on
+the C3, ~259KB on the S3, matching its larger SRAM). **Not verified**: the
+web UI and API themselves, since this environment has no WiFi adapter to
+join the AP and exercise `/api/*` or the WebSocket over the air — connect a
+phone or laptop to the AP and walk through [docs/self-test.md](docs/self-test.md)'s
 functional checklist (jog, pattern loop, record/save, autostart-after-reset)
 to finish verification.
 
@@ -181,8 +200,21 @@ every 250ms — see `NET_CMD_RESEND_INTERVAL_MS`/`SERVO_REAPPLY_INTERVAL_MS` in
 `firmware/include/Config.h`. Whichever command reached a Node *last* (local
 jog, another app, a gamepad stream) always wins; if a gamepad moves faster
 than packets can be delivered, intermediate positions may be skipped but the
-Node reliably converges on the final position once movement stops. See
+Node reliably converges on the final position once movement stops.
+
+That resend mechanism means more than one command for the same target is
+often in flight, and a congested/degrading link (that same phone-on-the-AP
+scenario) can deliver them **out of order** — without protection, a delayed
+resend of an older angle arriving after a newer command would erratically
+snap the servo backward. Every command now carries a per-boot session id
+plus an increasing sequence number; a Node drops anything not newer than
+what it already applied, so a late/stale packet is a no-op rather than a
+step backward. This is the fix for the "servo moves erratically when the
+network connection is flaky" symptom — see
 [docs/serial-protocol.md](docs/serial-protocol.md) for the full picture.
+Because the packet layout changed, **Master and every Node need matching
+firmware** — a version mismatch makes them silently ignore each other
+rather than misbehave.
 
 ## Storage
 
@@ -219,13 +251,14 @@ Node reliably converges on the final position once movement stops. See
   previously-configured Master/Node role back to Standalone on reflash — a
   documented, intentional fallback, not a bug, but it means re-picking
   Mode/Node ID after this update.
-- The command-resend/reapply robustness mechanisms (see above) are
-  build-verified only — reproducing the actual failure mode (a phone joined
-  to a Node's AP while a gamepad drives it through the Master) needs real
-  hardware, a real phone, and a real gamepad simultaneously, none of which
-  this sandbox has all at once. Worth confirming in the field that a Node
-  recovers on its own within ~300-550ms of the interference easing, without
-  needing a reboot.
+- The command-resend/reapply/ordering robustness mechanisms (see above) are
+  build-verified and flashed to all 4 boards on hand, but reproducing the
+  actual failure mode (a phone joined to a Node's AP while a gamepad drives
+  it through the Master) needs real hardware, a real phone, and a real
+  gamepad simultaneously, none of which this sandbox has all at once. Worth
+  confirming in the field that a Node recovers on its own within
+  ~300-550ms of the interference easing, without needing a reboot, and that
+  it no longer snaps backward to a stale angle while doing so.
 - The web UI screenshots above were captured by serving `firmware/data/`
   through a local mock API (canned JSON standing in for the ESP32's
   responses) and driving a real headless Chromium over it — real rendering

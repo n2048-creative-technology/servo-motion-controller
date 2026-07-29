@@ -60,6 +60,29 @@ positions may be skipped but the Node reliably converges on the final
 position once movement stops (see `firmware/include/Config.h` for both
 constants).
 
+### Ordering: a resend can't move the servo backward
+
+The periodic resend above means more than one in-flight CMD packet for the
+same target is now normal, not exceptional. Under a degraded/congested link
+(the same phone-joins-the-AP scenario), packets can be delayed enough to
+**arrive out of order** — without protection, a resend of an *older* angle
+that gets delayed past a *newer* command would erratically yank the servo
+back after it had already moved on.
+
+Every CMD packet carries a per-boot `sessionId` (randomized when a Master's
+ESP-NOW comes up) and a `seq` that increments on every send, resends
+included. A Node tracks the highest `(sessionId, seq)` it's applied and
+silently drops anything not newer — so a delayed/stale packet is a no-op,
+never a step backward. A changed `sessionId` (the Master rebooted) always
+wins, so a Node doesn't get stuck ignoring a Master that came back with its
+counter reset to 0. Non-finite angles (a corrupted payload) are dropped the
+same way, as cheap insurance against ever computing a garbage pulse width.
+
+This is why **Master and every Node must run matching firmware** — a
+`NET_PACKET_VERSION` mismatch (bumped whenever the packet layout changes,
+as it did for this ordering fix) makes them silently ignore each other
+rather than misinterpret each other's bytes.
+
 ## Requirements for this to work
 
 - Every board that should talk to each other (Master + all its Nodes) must

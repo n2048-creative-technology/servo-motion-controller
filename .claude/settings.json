@@ -4,7 +4,28 @@
       "Bash(pio run *)",
       "Bash(ls /dev/ttyACM* 2>&1)",
       "Read(//dev/**)",
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(find ~/.platformio -iname \"*xiao*esp32s3*\" -maxdepth 6 2>/dev/null | head -20)",
+      "Read(//home/mauricio/.platformio/**)",
+      "Bash(cat /home/mauricio/.platformio/platforms/espressif32/boards/seeed_xiao_esp32s3.json)",
+      "Read(//home/mauricio/.platformio/platforms/espressif32/boards/**)",
+      "Bash(cat /home/mauricio/.platformio/packages/framework-arduinoespressif32/variants/XIAO_ESP32S3/pins_arduino.h)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/variants/XIAO_ESP32S3/**)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/variants/XIAO_ESP32C3/**)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/variants/**)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\(d['build'].get\\('extra_flags'\\)\\)\")",
+      "Bash(ls /dev/ttyACM* /dev/ttyUSB* 2>&1)",
+      "Bash(python3 /home/mauricio/.platformio/packages/tool-esptoolpy/esptool.py --port /dev/ttyACM0 --no-stub --baud 115200 chip_id)",
+      "Bash(ls /dev/ttyACM* 2>&1 *)",
+      "Bash(grep -rli \"strap\" /home/mauricio/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/ 2>/dev/null | head -10)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/**)",
+      "Bash(grep -B2 -A5 -i \"strap\" /home/mauricio/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/soc/esp32s3/include/soc/gpio_reg.h 2>/dev/null | head -60)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/soc/esp32s3/include/soc/**)",
+      "Bash(grep -rn \"strapping\\\\|STRAP\" /home/mauricio/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/soc/esp32s3/include/soc/gpio_periph.c 2>/dev/null | head -20 *)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32s3/include/soc/**)",
+      "Bash(dmesg)",
+      "Bash(lsusb)",
+      "Bash(python3 - \"/dev/ttyACM0\")"
     ]
   }
 }

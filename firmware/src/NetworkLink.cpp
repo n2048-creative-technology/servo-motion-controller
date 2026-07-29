@@ -141,7 +141,16 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
   if (len != sizeof(NetPacket)) return;
   NetPacket pkt;
   memcpy(&pkt, data, sizeof(pkt));
-  if (pkt.magic != NET_PACKET_MAGIC || pkt.version != NET_PACKET_VERSION) return;
+  if (pkt.magic != NET_PACKET_MAGIC) return;
+  if (pkt.version != NET_PACKET_VERSION) {
+    // Otherwise silent and easy to mistake for "that board is out of range":
+    // a board left off a firmware update round talks a protocol version this
+    // one doesn't recognize and gets ignored with no other symptom.
+    Serial.printf("[NET] ignoring packet with protocol version %u (this board expects %u) — "
+                  "that sender needs reflashing to match\n",
+                  pkt.version, NET_PACKET_VERSION);
+    return;
+  }
 
   const uint32_t now = millis();
 
