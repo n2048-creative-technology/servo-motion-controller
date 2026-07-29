@@ -13,7 +13,6 @@ Python installs; on Debian/Ubuntu install `python3-tk` if it's missing.
 
 import json
 import queue
-import threading
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -21,66 +20,11 @@ from tkinter import ttk, messagebox
 import serial
 from serial.tools import list_ports
 
-BAUD_RATE = 115200
+from serial_link import SerialLink, BAUD_RATE
+
 NODE_POLL_INTERVAL_MS = 2000
 JOG_SEND_INTERVAL_S = 0.04  # ~25 Hz, matches the web UI's jog slider throttle
 MAX_LOG_LINES = 500
-
-
-class SerialLink:
-    """Owns the serial port and a background line-reader thread.
-
-    Reads happen off the Tk main thread (blocking readline() would freeze the
-    GUI); received lines are handed to `on_line` which must be thread-safe —
-    callers marshal them onto the main thread via a queue.Queue.
-    """
-
-    def __init__(self, on_line, on_error):
-        self._ser = None
-        self._reader_thread = None
-        self._stop_event = threading.Event()
-        self._on_line = on_line
-        self._on_error = on_error
-
-    @property
-    def is_open(self):
-        return self._ser is not None and self._ser.is_open
-
-    def connect(self, port):
-        self._ser = serial.Serial(port, BAUD_RATE, timeout=0.2)
-        self._stop_event.clear()
-        self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
-        self._reader_thread.start()
-
-    def disconnect(self):
-        self._stop_event.set()
-        if self._reader_thread is not None:
-            self._reader_thread.join(timeout=1.0)
-        self._reader_thread = None
-        if self._ser is not None:
-            self._ser.close()
-        self._ser = None
-
-    def send(self, obj):
-        if not self.is_open:
-            raise RuntimeError("not connected")
-        line = json.dumps(obj) + "\n"
-        self._ser.write(line.encode("utf-8"))
-        return line
-
-    def _read_loop(self):
-        while not self._stop_event.is_set():
-            try:
-                raw = self._ser.readline()
-            except (serial.SerialException, OSError) as exc:
-                if not self._stop_event.is_set():
-                    self._on_error(str(exc))
-                return
-            if not raw:
-                continue
-            text = raw.decode("utf-8", errors="replace").rstrip()
-            if text:
-                self._on_line(text)
 
 
 class App:

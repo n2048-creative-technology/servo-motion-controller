@@ -14,10 +14,10 @@ difference(){
     translate([5,0,3.5]) linear_extrude(16) offset(.2) projection(cut=true) translate([0,0,-3]) hull() xiao();
     
     
-    translate([36,15]/2) cylinder(d=2.5,h=30,center=true);
-    translate([-36,15]/2) cylinder(d=2.5,h=30,center=true);
-    translate([36,-15]/2) cylinder(d=2.5,h=30,center=true);
-    translate([-36,-15]/2) cylinder(d=2.5,h=30,center=true);
+    translate([36,15]/2) cylinder(d=2.5,h=100,center=true);
+    translate([-36,15]/2) cylinder(d=2.5,h=100,center=true);
+    translate([36,-15]/2) cylinder(d=2.5,h=100,center=true);
+    translate([-36,-15]/2) cylinder(d=2.5,h=100,center=true);
     
     translate([0,0,17-1.5]) linear_extrude(5) offset(1.5) offset(-1.5) square([40-1,20-1],center=true);
     
@@ -36,10 +36,10 @@ difference(){
     translate([-9,0,5]) cylinder(d=18,h=20);
     
     
-    translate([36,15]/2) cylinder(d=7,h=19,center=true);
-    translate([-36,15]/2) cylinder(d=7,h=19,center=true);
-    translate([36,-15]/2) cylinder(d=7,h=19,center=true);
-    translate([-36,-15]/2) cylinder(d=7,h=19,center=true);
+    translate([36,15]/2) cylinder(d=7,h=21,center=true);
+    translate([-36,15]/2) cylinder(d=7,h=21,center=true);
+    translate([36,-15]/2) cylinder(d=7,h=21,center=true);
+    translate([-36,-15]/2) cylinder(d=7,h=21,center=true);
     
     
 }

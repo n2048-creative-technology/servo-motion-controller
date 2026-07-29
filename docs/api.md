@@ -20,7 +20,7 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 | GET | `/api/sequence` | — | `{present, points, duration_ms}` for the saved sequence |
 | POST | `/api/sequence/play` | — | mode → `sequence`, loops the saved recording |
 | POST | `/api/sequence/stop` | — | mode → `manual` |
-| GET | `/api/settings` | — | `{ap:{ssid,has_password}, servo:{min_us,max_us,min_angle,max_angle,center_angle}, autostart:{enabled,target,pattern}, network:{mode,node_id}}` — password is never echoed back |
+| GET | `/api/settings` | — | `{ap:{ssid,has_password}, servo:{min_us,max_us,min_angle,max_angle,center_angle,invert}, autostart:{enabled,target,pattern}, network:{mode,node_id}}` — password is never echoed back |
 | POST | `/api/settings` | any subset of the GET shape (`ap.password` only if changing it) | persists to NVS; servo calibration changes take effect immediately, `network.*` changes need a reboot (see `/api/reboot`) |
 | POST | `/api/settings/reset` | — | restores factory defaults (only recovery path if AP credentials are forgotten) |
 | POST | `/api/reboot` | — | applies pending AP credential / network-mode changes via `ESP.restart()` |
@@ -28,6 +28,12 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 
 `mode` is one of `idle`, `manual`, `recording`, `pattern`, `sequence`, `network`
 (`network` = last moved by a wireless command from a Master, Node boards only).
+
+`servo.invert` flips which physical end of the pulse range a given angle
+drives (for a servo mounted mirrored/reversed relative to how min/max angle
+were calibrated) — it doesn't change what an angle *means* to the rest of
+the API: jog/pattern/sequence/network commands, recordings, and `GET
+/api/status`'s `angle` are unaffected, only the resulting pulse direction is.
 
 `network.mode` is one of `standalone` (default), `node`, `master` — see
 [serial-protocol.md](serial-protocol.md) for the Master's PC-facing protocol

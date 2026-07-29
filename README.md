@@ -130,7 +130,12 @@ of that, a board can be switched (Settings → Network) into:
   For PC-driven control there's also [scripts-tools/master_gui.py](scripts-tools/master_gui.py),
   a small Tkinter app that connects to a Master's serial port, shows its known
   Nodes, and lets you jog/send positions to a selection of them (or broadcast
-  to all) without writing any code — see [scripts-tools/README.md](scripts-tools/README.md).
+  to all) without writing any code, and
+  [scripts-tools/joystick_master_gui.py](scripts-tools/joystick_master_gui.py),
+  which links a physical joystick/gamepad's axes to Nodes (with a "learn the
+  axis" calibration step), streams live movement to them, and can record a
+  performance to CSV (Node ID + angle per timestamp) for standalone replay
+  without the controller — see [scripts-tools/README.md](scripts-tools/README.md).
 
 How it works: Master and Nodes talk over **ESP-NOW** (direct ESP32-to-ESP32
 radio, no router involved), broadcasting on the same fixed AP WiFi channel
@@ -175,8 +180,10 @@ on it where that's not true.
   (a real serial or web-UI command moving a *remote* servo) hasn't been
   hands-on verified end-to-end yet — flash a second board as a Node with a
   chosen Node ID and confirm it responds before relying on this in the field.
-- `scripts-tools/master_gui.py` (the PC GUI) is only syntax/compile-checked
-  here — this sandbox has no display server (no Xvfb), so the Tkinter window
-  itself hasn't been visually exercised. Worth a quick manual run before
-  relying on it for a show.
+- The `scripts-tools/` PC GUIs are only syntax-checked and, for
+  `joystick_master_gui.py`, logic-tested (axis-mapping math, CSV round-trip)
+  in this sandbox — no display server (no Xvfb) and no physical
+  controller attached, so neither Tkinter window has been visually driven,
+  and the pygame joystick path has never seen a real device. Worth a manual
+  run of both before relying on them for a show.
 # servo-motion-controller

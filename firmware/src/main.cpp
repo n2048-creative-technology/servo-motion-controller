@@ -39,7 +39,7 @@ void setup() {
                 settings.autostartEnabled ? 1 : 0);
 
   servo.begin(SERVO_PIN, settings.servoMinUs, settings.servoMaxUs, settings.servoMinAngle,
-              settings.servoMaxAngle);
+              settings.servoMaxAngle, settings.servoInvert);
   servo.writeAngle(settings.servoCenterAngle);
   Serial.printf("[SELFTEST] servo attached pin=%d range=%u-%uus\n", SERVO_PIN, settings.servoMinUs,
                 settings.servoMaxUs);

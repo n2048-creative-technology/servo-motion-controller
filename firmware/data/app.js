@@ -259,6 +259,7 @@
     $("calMinAngle").value = s.servo.min_angle;
     $("calMaxAngle").value = s.servo.max_angle;
     $("calCenterAngle").value = s.servo.center_angle;
+    $("calInvert").checked = s.servo.invert;
 
     $("asEnabled").checked = s.autostart.enabled;
     $("asTarget").value = s.autostart.target;
@@ -411,6 +412,7 @@
           min_angle: parseFloat($("calMinAngle").value),
           max_angle: parseFloat($("calMaxAngle").value),
           center_angle: parseFloat($("calCenterAngle").value),
+          invert: $("calInvert").checked,
         },
       });
     });

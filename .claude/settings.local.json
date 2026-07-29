@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import websocket; print\\(websocket.__version__ if hasattr\\(websocket,'__version__'\\) else 'ok'\\)\")",
+      "Bash(pkill -f mock_webui_server.py)",
+      "Bash(pkill -f \"remote-debugging-port\")",
+      "Bash(python3 /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/capture_shots.py)",
+      "Bash(timeout 55 python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/capture_shots.py)",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/capture_shots.py)",
+      "Bash(echo \"SCRIPT EXIT: $?\")"
+    ]
+  }
+}

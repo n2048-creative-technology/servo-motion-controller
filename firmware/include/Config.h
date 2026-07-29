@@ -32,7 +32,7 @@ static constexpr uint16_t SEQUENCE_FILE_VERSION = 1;
 static constexpr const char *NVS_NAMESPACE = "app";
 static constexpr const char *NVS_KEY = "cfg";
 static constexpr uint32_t SETTINGS_MAGIC = 0x53565831; // "1XVS"
-static constexpr uint16_t SETTINGS_VERSION = 2; // v2: added networkMode/nodeId (v1 blobs fall back to defaults)
+static constexpr uint16_t SETTINGS_VERSION = 3; // v3: added servoInvert (older blobs fall back to defaults)
 
 // ---- WiFi AP defaults ----
 static constexpr const char *AP_SSID_PREFIX = "ServoRig-";

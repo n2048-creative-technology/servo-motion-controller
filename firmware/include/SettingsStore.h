@@ -33,6 +33,7 @@ struct PersistedSettings {
   float servoMinAngle = SERVO_DEFAULT_MIN_ANGLE;
   float servoMaxAngle = SERVO_DEFAULT_MAX_ANGLE;
   float servoCenterAngle = SERVO_DEFAULT_CENTER_ANGLE;
+  bool servoInvert = false;
 
   bool autostartEnabled = false;
   AutostartTarget autostartTarget = AutostartTarget::NONE;

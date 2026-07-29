@@ -286,6 +286,7 @@ void WebApi::setupRoutes() {
     servoObj["min_angle"] = s.servoMinAngle;
     servoObj["max_angle"] = s.servoMaxAngle;
     servoObj["center_angle"] = s.servoCenterAngle;
+    servoObj["invert"] = s.servoInvert;
 
     JsonObject autostart = doc["autostart"].to<JsonObject>();
     autostart["enabled"] = s.autostartEnabled;
@@ -339,6 +340,10 @@ void WebApi::setupRoutes() {
         }
         if (calibrationChanged) {
           servo_->setCalibration(s.servoMinUs, s.servoMaxUs, s.servoMinAngle, s.servoMaxAngle);
+        }
+        if (json["servo"]["invert"].is<bool>()) {
+          s.servoInvert = json["servo"]["invert"].as<bool>();
+          servo_->setInvert(s.servoInvert);
         }
 
         if (json["autostart"]["enabled"].is<bool>()) {
