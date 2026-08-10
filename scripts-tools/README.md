@@ -48,15 +48,28 @@ using [pygame](https://www.pygame.org/) for controller input. Same setup as
 above (`pip install -r requirements.txt` — this pulls in `pygame` too, then
 `python3 joystick_master_gui.py`).
 
+**Multiple controllers work at once** — plug in as many as you like (e.g. two
+gamepads for two people, or a pile of specialized controllers), and freely mix
+which one drives which Node: (controller 1, axis 2) → Node 3 and
+(controller 2, axis 4) → Node 1 can coexist as two ordinary mappings. Each
+mapping remembers its own controller by a stable per-device GUID (not by
+plug-in order, which can change across reconnects), so it stays correctly
+attached to the right physical device no matter what order things get
+plugged in.
+
 Workflow:
 
 1. Connect to the Master's serial port (same as `master_gui.py`).
-2. Pick your controller from the **Controller** dropdown and click
-   **Select** — a live readout of every raw axis value appears, handy for
-   telling axes apart before you commit to one.
+2. Connect your controller(s), then click **Refresh Controllers** — every
+   detected controller is opened at once and listed with a live readout of
+   its raw axis values, handy for telling axes apart. There's no "select a
+   controller" step; all connected ones are available for mapping
+   simultaneously.
 3. Click **Learn New Mapping**, then move *only* the physical axis you want
-   to link, for the ~4 seconds the dialog is watching. It picks whichever
-   axis moved the most, shows you its observed raw range, and asks you to
+   to link — on *any* connected controller — for the ~4 seconds the dialog
+   is watching. It watches every axis of every controller at once and picks
+   whichever one moved the most, identifying both the controller and the
+   axis automatically, shows you its observed raw range, and asks you to
    assign a **Node ID** — pick one from the dropdown of Nodes the Master has
    actually heard a heartbeat from (auto-refreshed every 2s in the
    background; hit the dialog's own Refresh if one just came online), or
@@ -64,17 +77,21 @@ Workflow:
    **angle range** (defaults to 0–270°, the firmware's default servo
    calibration — adjust to match the target servo's actual calibrated range
    from its own Settings tab). An **Invert** checkbox flips direction
-   without needing to redo the range. Repeat per axis you want to use; one
-   axis can also be linked to more than one Node
-   if you add it again. **Save Mappings…** writes the whole mapping list
-   (axis index, calibrated raw range, Node ID, angle range, invert) to a
-   JSON file, tagged with the controller's name; **Load Mappings…** restores
-   them later without re-learning — you're warned (not blocked) if the
-   currently-selected controller's name doesn't match the file's, since
-   axis numbering can differ across controller models.
-4. Check **Stream mapped axes to their Nodes** to start sending — each
-   mapped axis's angle is recalculated ~25 Hz and only resent when it moves
-   more than ~0.2°, to avoid flooding the link while idle.
+   without needing to redo the range. Repeat per axis you want to use, on
+   whichever controller it's on; one axis can also be linked to more than
+   one Node if you add it again. **Save Mappings…** writes the whole mapping
+   list (each with its own controller GUID + name, axis index, calibrated
+   raw range, Node ID, angle range, invert) to a JSON file; **Load
+   Mappings…** restores them later without re-learning. A mapping whose
+   controller isn't currently connected shows `[controller not connected]`
+   in the list and is skipped by streaming/recording until you plug it back
+   in and click Refresh Controllers — it isn't lost, and reattaches
+   automatically once that controller (matched by GUID, or by name as a
+   fallback for files saved by an older version of this tool) is back.
+4. Check **Stream mapped axes to their Nodes** to start sending — every
+   mapped axis, across all connected controllers, is recalculated ~25 Hz and
+   only resent when it moves more than ~0.2°, to avoid flooding the link
+   while idle.
 5. **Start Recording** captures every mapped Node's computed angle (not the
    raw axis — the physical controller's identity is irrelevant on playback)
    at the same ~25 Hz, timestamped from recording start. **Save Recording
@@ -89,11 +106,16 @@ Workflow:
    ```
 
 6. **Load CSV…** + **Play** replays a recording by sending `{"node":
-   <id>, "angle": ...}` at the original relative timing — no controller
-   needed at all, so a captured performance can be replayed standalone.
-   **Loop** repeats it; **Stop** cancels mid-playback. **Speed** (0.1–2.0,
-   default 1.0) scales the timing between rows — 0.5 plays back at half
-   speed (slower), 2.0 at double speed — without touching the CSV itself.
+   <id>, "angle": ...}` — no controller needed at all, so a captured
+   performance can be replayed standalone. **Loop** repeats it; **Stop**
+   cancels mid-playback. **Speed** (0.1–2.0, default 1.0) doesn't just scale
+   the delay between the original rows — pressing Play resamples the whole
+   recording onto a fresh ~25 Hz grid at that speed (the CSV file itself is
+   untouched): below 1.0 it interpolates *extra* in-between points so slow
+   motion stays smooth instead of getting choppy from stretched-out gaps;
+   above 1.0 it interpolates *down* to ~25 Hz instead of bursting every
+   original row as fast as possible. Either way playback always lands
+   exactly on the final recorded position.
 
 Not hands-on verified in the sandbox this was built in (no display server,
 no physical controller attached) — the axis-mapping math and CSV

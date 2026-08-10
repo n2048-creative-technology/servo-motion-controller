@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """Joystick/gamepad -> Master board bridge.
 
-Reads a connected joystick or gamepad (via pygame) and streams positions to
-servo Nodes through a Master's USB serial port, using the same line-based
-JSON protocol as master_gui.py (see ../docs/serial-protocol.md). Lets you:
+Reads one or more connected joysticks/gamepads (via pygame) and streams
+positions to servo Nodes through a Master's USB serial port, using the same
+line-based JSON protocol as master_gui.py (see ../docs/serial-protocol.md).
+Lets you:
 
-  - "Learn" which physical axis you just moved and link it to a Node,
-    calibrating that axis's raw range to the Node's angle range.
-  - Stream live axis movement to the linked Node(s) once mapped.
-  - Record the computed angle for every mapped Node to a CSV file, and
-    replay that CSV later to reproduce the same motion without the
-    physical controller connected at all.
+  - "Learn" which physical axis on which controller you just moved and link
+    it to a Node, calibrating that axis's raw range to the Node's angle
+    range. With several controllers connected, each learned mapping
+    remembers its own controller (by a stable per-device GUID, not by
+    plug-in order), so e.g. (controller 1, axis 2) -> Node 3 and
+    (controller 2, axis 4) -> Node 1 coexist freely.
+  - Stream live axis movement from every mapped controller to its linked
+    Node(s) at once, once mapped.
+  - Record the computed angle for every mapped Node to a CSV file (which
+    controller/axis produced it is irrelevant to playback — only Node ID +
+    angle are recorded), and replay that CSV later to reproduce the same
+    motion without any physical controller connected at all.
 
 Requires: pyserial, pygame (`pip install -r requirements.txt`). Tkinter
 ships with most desktop Python installs; on Debian/Ubuntu install
 `python3-tk` if it's missing.
 """
 
+import bisect
 import csv
 import json
 import queue
@@ -44,9 +52,20 @@ PLAYBACK_SPEED_MAX = 2.0
 
 
 class AxisMapping:
-    """One learned axis -> Node link, with its raw and output angle ranges."""
+    """One learned (controller, axis) -> Node link, with its raw and output
+    angle ranges. `controller_guid` (SDL/pygame's Joystick.get_guid(), stable
+    across reconnects and USB port/order changes) is what actually resolves
+    to a live pygame.joystick.Joystick at runtime; `controller_name` is a
+    display-only label carried alongside it for the UI and for reattaching a
+    loaded mapping to a currently-connected controller by name when its guid
+    isn't connected (see App._try_autobind)."""
 
-    def __init__(self, axis_index, raw_min, raw_max, node_id, angle_min, angle_max, invert=False):
+    def __init__(
+        self, controller_guid, controller_name, axis_index, raw_min, raw_max, node_id, angle_min, angle_max,
+        invert=False,
+    ):
+        self.controller_guid = controller_guid
+        self.controller_name = controller_name
         self.axis_index = axis_index
         self.raw_min = raw_min
         self.raw_max = raw_max
@@ -65,10 +84,13 @@ class AxisMapping:
         return self.angle_min + t * (self.angle_max - self.angle_min)
 
     def label(self):
-        return f"Axis {self.axis_index} -> Node {self.node_id} [{self.angle_min:.0f}-{self.angle_max:.0f}°]"
+        controller = self.controller_name or "unknown controller"
+        return f"{controller} axis {self.axis_index} -> Node {self.node_id} [{self.angle_min:.0f}-{self.angle_max:.0f}°]"
 
     def to_dict(self):
         return {
+            "controller_guid": self.controller_guid,
+            "controller_name": self.controller_name,
             "axis_index": self.axis_index,
             "raw_min": self.raw_min,
             "raw_max": self.raw_max,
@@ -81,6 +103,8 @@ class AxisMapping:
     @classmethod
     def from_dict(cls, d):
         return cls(
+            controller_guid=d.get("controller_guid"),
+            controller_name=d.get("controller_name"),
             axis_index=int(d["axis_index"]),
             raw_min=float(d["raw_min"]),
             raw_max=float(d["raw_max"]),
@@ -91,21 +115,29 @@ class AxisMapping:
         )
 
 
-def save_mapping_config(path, mappings, controller_name=None):
-    """Save learned axis -> Node mappings so they survive a restart without
-    re-learning. `controller_name` (if known) is stored only as a sanity-check
-    hint for load_mapping_config, not enforced."""
-    data = {"controller_name": controller_name, "mappings": [m.to_dict() for m in mappings]}
+def save_mapping_config(path, mappings):
+    """Save learned mappings (each carrying its own controller identity) so
+    they survive a restart without re-learning."""
+    data = {"mappings": [m.to_dict() for m in mappings]}
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
 
 def load_mapping_config(path):
-    """Returns (controller_name_or_None, [AxisMapping, ...])."""
+    """Returns [AxisMapping, ...]. Mappings saved by the older single-controller
+    format (a file-level "controller_name", no per-mapping controller_guid)
+    load with controller_guid=None and controller_name backfilled from that
+    file-level field — App._try_autobind then reattaches them by name to
+    whichever currently-connected controller matches, if any."""
     with open(path) as f:
         data = json.load(f)
+    legacy_name = data.get("controller_name")
     mappings = [AxisMapping.from_dict(d) for d in data.get("mappings", [])]
-    return data.get("controller_name"), mappings
+    if legacy_name:
+        for m in mappings:
+            if m.controller_guid is None and m.controller_name is None:
+                m.controller_name = legacy_name
+    return mappings
 
 
 def load_csv_rows(path):
@@ -132,26 +164,97 @@ def save_csv_rows(path, rows):
             writer.writerow([t_ms] + [f"{sample[nid]:.1f}" if nid in sample else "" for nid in node_ids])
 
 
-class LearnDialog(tk.Toplevel):
-    """Phase 1: watch all axes for a few seconds, pick the one that moved
-    most. Phase 2: assign the winning axis to a Node + angle range, reusing
-    the same window."""
+def _interp_channel(times, values, src_t):
+    """Linear-interpolate one node's angle at src_t from its (sorted) recorded
+    (time, value) points; holds the nearest edge value outside the recorded
+    range instead of extrapolating."""
+    if not times:
+        return None
+    if src_t <= times[0]:
+        return values[0]
+    if src_t >= times[-1]:
+        return values[-1]
+    i = bisect.bisect_left(times, src_t)
+    t0, t1 = times[i - 1], times[i]
+    if t1 == t0:
+        return values[i]
+    frac = (src_t - t0) / (t1 - t0)
+    return values[i - 1] + frac * (values[i] - values[i - 1])
 
-    def __init__(self, parent, joystick, known_nodes_provider, on_saved):
+
+def resample_rows(rows, output_interval_ms, speed):
+    """Resample recorded (t_ms, {node_id: angle}) rows onto a fixed-cadence
+    output grid, so the actual send rate during playback stays close to
+    `output_interval_ms` regardless of speed instead of just stretching or
+    compressing the gaps between the original samples:
+
+      - speed < 1 (slow motion): the source timeline is stretched, so more
+        output points are generated than were recorded, each one linearly
+        interpolated between whichever original samples straddle it —
+        smoother motion instead of big gaps between infrequent updates.
+      - speed > 1 (fast motion): fewer output points than were recorded,
+        each interpolated from the compressed source timeline — caps the
+        send rate instead of bursting every original sample as fast as
+        possible.
+
+    Always ends on the exact final recorded position, at every speed.
+    """
+    if not rows:
+        return []
+
+    node_ids = sorted({nid for _, sample in rows for nid in sample})
+    timelines = {}
+    for nid in node_ids:
+        pts = [(t, s[nid]) for t, s in rows if nid in s]
+        timelines[nid] = ([p[0] for p in pts], [p[1] for p in pts])
+
+    duration_ms = rows[-1][0]
+    output_duration_ms = max(0, int(duration_ms / speed))
+
+    def sample_at(src_t):
+        out = {}
+        for nid in node_ids:
+            times, values = timelines[nid]
+            v = _interp_channel(times, values, src_t)
+            if v is not None:
+                out[nid] = v
+        return out
+
+    out_rows = []
+    out_t = 0
+    while out_t < output_duration_ms:
+        out_rows.append((out_t, sample_at(out_t * speed)))
+        out_t += output_interval_ms
+    out_rows.append((output_duration_ms, sample_at(duration_ms)))  # exact final position, always
+    return out_rows
+
+
+class LearnDialog(tk.Toplevel):
+    """Phase 1: watch every axis of every currently-connected controller for
+    a few seconds, pick whichever (controller, axis) pair moved most — so
+    with several controllers plugged in, you just move the stick you want to
+    link and it's identified automatically, no need to pick a controller
+    first. Phase 2: assign that winner to a Node + angle range, reusing the
+    same window."""
+
+    def __init__(self, parent, controllers, known_nodes_provider, on_saved):
         super().__init__(parent)
         self.title("Learn axis")
         self.resizable(False, False)
-        self.joystick = joystick
+        self.controllers = controllers  # [(guid, name, Joystick), ...] snapshot
         self.known_nodes_provider = known_nodes_provider
         self.on_saved = on_saved
-        self.axis_count = joystick.get_numaxes()
-        self.mins = [float("inf")] * self.axis_count
-        self.maxs = [float("-inf")] * self.axis_count
+        self.mins = {}  # (guid, axis_index) -> min seen
+        self.maxs = {}  # (guid, axis_index) -> max seen
+        for guid, _name, js in self.controllers:
+            for i in range(js.get_numaxes()):
+                self.mins[(guid, i)] = float("inf")
+                self.maxs[(guid, i)] = float("-inf")
         self.elapsed_ms = 0
-        self.learned_axis = None
 
-        self.status_var = tk.StringVar(value="Move the axis you want to link now…")
-        ttk.Label(self, textvariable=self.status_var, padding=12).pack()
+        watching = ", ".join(name for _g, name, _j in self.controllers) or "no controllers connected"
+        self.status_var = tk.StringVar(value=f"Move the axis you want to link now… (watching: {watching})")
+        ttk.Label(self, textvariable=self.status_var, padding=12, wraplength=320).pack()
         self.progress = ttk.Progressbar(self, maximum=LEARN_DURATION_MS, length=280)
         self.progress.pack(padx=12, pady=(0, 12))
         self.cancel_btn = ttk.Button(self, text="Cancel", command=self.destroy)
@@ -164,12 +267,18 @@ class LearnDialog(tk.Toplevel):
         if not self.winfo_exists():
             return
         pygame.event.pump()
-        for i in range(self.axis_count):
-            v = self.joystick.get_axis(i)
-            if v < self.mins[i]:
-                self.mins[i] = v
-            if v > self.maxs[i]:
-                self.maxs[i] = v
+        for guid, _name, js in self.controllers:
+            try:
+                num_axes = js.get_numaxes()
+                for i in range(num_axes):
+                    v = js.get_axis(i)
+                    key = (guid, i)
+                    if v < self.mins[key]:
+                        self.mins[key] = v
+                    if v > self.maxs[key]:
+                        self.maxs[key] = v
+            except pygame.error:
+                continue  # that controller was unplugged mid-learn; skip it this tick
         self.elapsed_ms += LEARN_POLL_INTERVAL_MS
         self.progress["value"] = min(self.elapsed_ms, LEARN_DURATION_MS)
         if self.elapsed_ms < LEARN_DURATION_MS:
@@ -178,26 +287,31 @@ class LearnDialog(tk.Toplevel):
             self._finish_learn()
 
     def _finish_learn(self):
-        spans = [(self.maxs[i] - self.mins[i], i) for i in range(self.axis_count)]
+        spans = [(self.maxs[k] - self.mins[k], k) for k in self.mins]
         spans.sort(reverse=True)
-        best_span, best_axis = spans[0] if spans else (0.0, None)
-        if best_axis is None or best_span < MIN_LEARN_RANGE:
+        best_span, best_key = spans[0] if spans else (0.0, None)
+        if best_key is None or best_span < MIN_LEARN_RANGE:
             messagebox.showwarning(
                 "No clear movement",
-                "Didn't detect a clear axis movement. Try again and move one axis through its full range.",
+                "Didn't detect a clear axis movement. Try again and move one axis (on any connected "
+                "controller) through its full range.",
                 parent=self,
             )
             self.destroy()
             return
-        self.learned_axis = best_axis
-        self._show_assign_form(best_axis, self.mins[best_axis], self.maxs[best_axis])
+        guid, axis_index = best_key
+        controller_name = next((name for g, name, _js in self.controllers if g == guid), "unknown controller")
+        self._show_assign_form(guid, controller_name, axis_index, self.mins[best_key], self.maxs[best_key])
 
-    def _show_assign_form(self, axis_index, raw_min, raw_max):
+    def _show_assign_form(self, controller_guid, controller_name, axis_index, raw_min, raw_max):
         for child in self.winfo_children():
             child.destroy()
 
         ttk.Label(
-            self, text=f"Detected axis {axis_index} (raw range {raw_min:.2f} to {raw_max:.2f})", padding=(12, 12, 12, 4)
+            self,
+            text=f"Detected {controller_name} axis {axis_index} (raw range {raw_min:.2f} to {raw_max:.2f})",
+            padding=(12, 12, 12, 4),
+            wraplength=320,
         ).grid(row=0, column=0, columnspan=2, sticky="w")
 
         form = ttk.Frame(self, padding=12)
@@ -266,6 +380,8 @@ class LearnDialog(tk.Toplevel):
                 messagebox.showerror("Invalid input", "Node ID must be 0-250.", parent=self)
                 return
             mapping = AxisMapping(
+                controller_guid=controller_guid,
+                controller_name=controller_name,
                 axis_index=axis_index,
                 raw_min=raw_min,
                 raw_max=raw_max,
@@ -295,7 +411,8 @@ class App:
 
         self.incoming = queue.Queue()
         self.link = SerialLink(on_line=self.incoming.put, on_error=self._on_link_error)
-        self.joystick = None
+        self.joysticks = {}  # guid -> open pygame.joystick.Joystick, ALL connected controllers at once
+        self.joystick_names = {}  # guid -> name, kept even after a controller disconnects (for display)
         self.mappings = []
         self.known_nodes = {}  # node_id -> {"angle":..., "age_ms":...}, from the Master's heartbeat table
         self._node_poll_job = None
@@ -305,6 +422,7 @@ class App:
         self.record_start_ms = None
         self.record_buffer = []
         self.playback_rows = []
+        self._playback_plan = []  # resample_rows(playback_rows, ...) at the speed Play was pressed with
         self.playback_index = 0
         self._playback_job = None
 
@@ -330,19 +448,22 @@ class App:
         self.status_var = tk.StringVar(value="disconnected")
         ttk.Label(conn, textvariable=self.status_var, foreground="#a33").grid(row=0, column=4, sticky="w", padx=(10, 0))
 
-        joy = ttk.LabelFrame(self.root, text="Controller", padding=8)
+        joy = ttk.LabelFrame(self.root, text="Controllers (all connected ones are usable at once)", padding=8)
         joy.pack(fill="x", padx=8, pady=(0, 8))
 
-        ttk.Label(joy, text="Device:").grid(row=0, column=0, sticky="w")
-        self.joy_var = tk.StringVar()
-        self.joy_combo = ttk.Combobox(joy, textvariable=self.joy_var, width=32, state="readonly")
-        self.joy_combo.grid(row=0, column=1, sticky="w", padx=(4, 4))
-        ttk.Button(joy, text="Refresh", command=self._refresh_controllers).grid(row=0, column=2, sticky="w")
-        ttk.Button(joy, text="Select", command=self._select_controller).grid(row=0, column=3, sticky="w", padx=(8, 0))
-
-        self.axis_var = tk.StringVar(value="no controller selected")
-        ttk.Label(joy, textvariable=self.axis_var, foreground="#666").grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        self.joy_tree = ttk.Treeview(joy, columns=("axes",), show="tree headings", height=3)
+        self.joy_tree.heading("#0", text="Controller")
+        self.joy_tree.column("#0", width=220)
+        self.joy_tree.heading("axes", text="Live axis values")
+        self.joy_tree.column("axes", width=380)
+        self.joy_tree.grid(row=0, column=0, sticky="ew")
+        joy.columnconfigure(0, weight=1)
+        ttk.Button(joy, text="Refresh Controllers", command=self._refresh_controllers).grid(
+            row=0, column=1, sticky="n", padx=(8, 0)
+        )
+        self.joy_hint_var = tk.StringVar(value="no controllers detected")
+        ttk.Label(joy, textvariable=self.joy_hint_var, foreground="#666").grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
         mapframe = ttk.LabelFrame(self.root, text="Axis -> Node mappings", padding=8)
@@ -467,46 +588,81 @@ class App:
 
     # ---------- controller handling ----------
     def _refresh_controllers(self):
+        # A full quit/init cycle is how pygame picks up newly (dis)connected
+        # devices; it also invalidates any previously-opened Joystick
+        # objects, so everything gets reopened fresh below.
         pygame.joystick.quit()
         pygame.joystick.init()
-        count = pygame.joystick.get_count()
-        names = []
-        for i in range(count):
-            js = pygame.joystick.Joystick(i)
-            names.append(f"{i}: {js.get_name()}")
-        self.joy_combo["values"] = names
-        if names and not self.joy_var.get():
-            self.joy_var.set(names[0])
-        if count == 0:
-            self.axis_var.set("no controller detected")
 
-    def _select_controller(self):
-        val = self.joy_var.get()
-        if not val:
-            return
-        index = int(val.split(":", 1)[0])
-        try:
-            self.joystick = pygame.joystick.Joystick(index)
-            self.joystick.init()
-        except pygame.error as exc:
-            messagebox.showerror("Controller error", str(exc))
-            self.joystick = None
-            return
-        self.learn_btn.configure(state="normal")
-        self._log(f"-- controller selected: {self.joystick.get_name()} --")
+        self.joysticks = {}
+        for i in range(pygame.joystick.get_count()):
+            try:
+                js = pygame.joystick.Joystick(i)
+                js.init()
+                guid = js.get_guid()
+            except pygame.error:
+                continue
+            self.joysticks[guid] = js
+            self.joystick_names[guid] = js.get_name()
+
+        self.joy_tree.delete(*self.joy_tree.get_children())
+        for guid, js in self.joysticks.items():
+            self.joy_tree.insert("", "end", iid=guid, text=self.joystick_names[guid], values=("",))
+
+        if self.joysticks:
+            names = ", ".join(self.joystick_names[g] for g in self.joysticks)
+            self.joy_hint_var.set(f"{len(self.joysticks)} controller(s) connected: {names}")
+            self.learn_btn.configure(state="normal")
+        else:
+            self.joy_hint_var.set("no controllers detected")
+            self.learn_btn.configure(state="disabled")
+
+        # Mappings whose controller just (dis)appeared need their connectivity
+        # label refreshed, and a reconnect is a good moment to try binding any
+        # still-unresolved (e.g. loaded-from-an-old-file) mappings by name.
+        for m in self.mappings:
+            self._try_autobind(m)
+        self._reload_mapping_tree()
 
     # ---------- mappings ----------
     def _start_learn(self):
-        if self.joystick is None:
-            messagebox.showwarning("No controller", "Select a controller first.")
+        if not self.joysticks:
+            messagebox.showwarning("No controller", "Connect a controller and click Refresh Controllers first.")
             return
+        controllers = [(guid, self.joystick_names[guid], js) for guid, js in self.joysticks.items()]
         LearnDialog(
-            self.root, self.joystick, known_nodes_provider=self._known_nodes_snapshot, on_saved=self._add_mapping
+            self.root, controllers, known_nodes_provider=self._known_nodes_snapshot, on_saved=self._add_mapping
         )
+
+    def _try_autobind(self, mapping):
+        """If `mapping`'s controller isn't currently connected but exactly one
+        connected controller shares its display name, adopt that
+        controller's guid. Lets a file saved by the older single-controller
+        format (or one made with a controller currently plugged into a
+        different USB port) reattach automatically instead of sitting
+        "not connected" forever for no real reason."""
+        if mapping.controller_guid in self.joysticks:
+            return
+        if not mapping.controller_name:
+            return
+        candidates = [g for g, name in self.joystick_names.items() if name == mapping.controller_name and g in self.joysticks]
+        if len(candidates) == 1:
+            old_guid = mapping.controller_guid
+            mapping.controller_guid = candidates[0]
+            self._log(
+                f"-- auto-bound mapping ({mapping.controller_name} axis {mapping.axis_index} -> "
+                f"Node {mapping.node_id}) to connected controller (was {old_guid}) --"
+            )
+
+    def _mapping_label(self, mapping):
+        label = mapping.label()
+        if mapping.controller_guid not in self.joysticks:
+            label += "  [controller not connected]"
+        return label
 
     def _add_mapping(self, mapping):
         self.mappings.append(mapping)
-        self.map_tree.insert("", "end", iid=str(len(self.mappings) - 1), values=(mapping.label(),))
+        self.map_tree.insert("", "end", iid=str(len(self.mappings) - 1), values=(self._mapping_label(mapping),))
         self._log(f"-- mapping added: {mapping.label()} --")
         self._update_streaming_availability()
 
@@ -520,7 +676,7 @@ class App:
     def _reload_mapping_tree(self):
         self.map_tree.delete(*self.map_tree.get_children())
         for i, m in enumerate(self.mappings):
-            self.map_tree.insert("", "end", iid=str(i), values=(m.label(),))
+            self.map_tree.insert("", "end", iid=str(i), values=(self._mapping_label(m),))
         self._update_streaming_availability()
 
     def _save_mappings(self):
@@ -530,8 +686,7 @@ class App:
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
         if not path:
             return
-        controller_name = self.joystick.get_name() if self.joystick is not None else None
-        save_mapping_config(path, self.mappings, controller_name)
+        save_mapping_config(path, self.mappings)
         self._log(f"-- saved {len(self.mappings)} mapping(s) to {path} --")
 
     def _load_mappings(self):
@@ -539,26 +694,27 @@ class App:
         if not path:
             return
         try:
-            controller_name, mappings = load_mapping_config(path)
+            mappings = load_mapping_config(path)
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             messagebox.showerror("Load failed", str(exc))
             return
         if not mappings:
             messagebox.showwarning("Empty file", "No mappings found in that file.")
             return
-        if (
-            controller_name
-            and self.joystick is not None
-            and controller_name != self.joystick.get_name()
-        ):
-            messagebox.showwarning(
-                "Different controller",
-                f"This file was saved for '{controller_name}', but the selected controller is "
-                f"'{self.joystick.get_name()}'. Axis numbering may not match — check the mappings.",
-            )
+        for m in mappings:
+            self._try_autobind(m)
         self.mappings = mappings
         self._reload_mapping_tree()
         self._log(f"-- loaded {len(mappings)} mapping(s) from {path} --")
+        missing = sorted({m.controller_name or "unknown" for m in mappings if m.controller_guid not in self.joysticks})
+        if missing:
+            messagebox.showwarning(
+                "Controller(s) not connected",
+                "These mappings reference controllers that aren't currently connected: "
+                + ", ".join(missing)
+                + ". Connect them and click Refresh Controllers — streaming/recording just skips a "
+                "mapping while its controller is offline.",
+            )
 
     def _update_streaming_availability(self):
         if self.mappings:
@@ -571,20 +727,35 @@ class App:
 
     # ---------- main tick: display + streaming + recording ----------
     def _tick(self):
-        if self.joystick is not None:
+        if self.joysticks:
             pygame.event.pump()
-            try:
-                axes_preview = ", ".join(f"{i}:{self.joystick.get_axis(i):+.2f}" for i in range(self.joystick.get_numaxes()))
-                self.axis_var.set(axes_preview)
-            except pygame.error:
-                self.joystick = None
-                self.axis_var.set("controller disconnected")
+            disconnected = []
+            for guid, js in self.joysticks.items():
+                try:
+                    axes_preview = ", ".join(f"{i}:{js.get_axis(i):+.2f}" for i in range(js.get_numaxes()))
+                    if self.joy_tree.exists(guid):
+                        self.joy_tree.item(guid, values=(axes_preview,))
+                except pygame.error:
+                    disconnected.append(guid)
+            if disconnected:
+                for guid in disconnected:
+                    del self.joysticks[guid]
+                    if self.joy_tree.exists(guid):
+                        self.joy_tree.item(guid, values=("(disconnected — click Refresh Controllers)",))
+                self._log(f"-- controller disconnected: {', '.join(self.joystick_names[g] for g in disconnected)} --")
+                self._reload_mapping_tree()  # mapping labels' "[not connected]" suffix needs updating
 
             if self.mappings:
                 now_ms = int(time.monotonic() * 1000)
                 sample = {}
                 for m in self.mappings:
-                    raw = self.joystick.get_axis(m.axis_index)
+                    js = self.joysticks.get(m.controller_guid)
+                    if js is None:
+                        continue  # that mapping's controller isn't connected right now; skip it
+                    try:
+                        raw = js.get_axis(m.axis_index)
+                    except pygame.error:
+                        continue
                     angle = m.compute_angle(raw)
                     sample[m.node_id] = angle
                     if self.streaming_var.get() and self.link.is_open:
@@ -649,16 +820,25 @@ class App:
             messagebox.showwarning("Not connected", "Connect to the Master's serial port first.")
             return
         self._stop_playback()
+        self._resample_for_playback()
         self.playback_index = 0
         self._send_playback_row()
 
+    def _resample_for_playback(self):
+        speed = self._playback_speed()
+        self._playback_plan = resample_rows(self.playback_rows, TICK_INTERVAL_MS, speed)
+        self._log(
+            f"-- resampled {len(self.playback_rows)} recorded sample(s) to "
+            f"{len(self._playback_plan)} at {speed:.2f}x speed --"
+        )
+
     def _send_playback_row(self):
-        if self.playback_index >= len(self.playback_rows):
+        if self.playback_index >= len(self._playback_plan):
             return
-        t_ms, sample = self.playback_rows[self.playback_index]
+        t_ms, sample = self._playback_plan[self.playback_index]
         for node_id, angle in sample.items():
             try:
-                line = self.link.send({"node": node_id, "angle": angle})
+                line = self.link.send({"node": node_id, "angle": round(angle, 1)})
                 self._log(f"-> {line.rstrip()}")
             except (RuntimeError, serial.SerialException, OSError) as exc:
                 self._log(f"-- playback send failed: {exc} --")
@@ -666,12 +846,12 @@ class App:
                 return
 
         next_index = self.playback_index + 1
-        if next_index < len(self.playback_rows):
-            raw_delay_ms = self.playback_rows[next_index][0] - t_ms
-            delay_ms = max(1, int(raw_delay_ms / self._playback_speed()))
+        if next_index < len(self._playback_plan):
+            delay_ms = max(1, self._playback_plan[next_index][0] - t_ms)
             self.playback_index = next_index
             self._playback_job = self.root.after(delay_ms, self._send_playback_row)
         elif self.loop_var.get():
+            self._resample_for_playback()  # pick up any speed change before looping again
             self.playback_index = 0
             self._playback_job = self.root.after(1, self._send_playback_row)
         else:

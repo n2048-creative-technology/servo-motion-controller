@@ -25,3 +25,17 @@ offset(1) offset(-1) offset(0.2) square([20,40],center=true);
 }
  
 }
+
+
+
+!linear_extrude(34){
+difference(){
+    offset(5) offset(-5) square([11,60], center=true);
+    translate([0,48]/2) circle(d=4.5);
+    translate([0,-48]/2) circle(d=4.5);
+    hull(){
+    translate([0,35]/2) circle(d=4.5);
+    translate([0,-35]/2) circle(d=4.5);
+    }
+}
+}
