@@ -46,7 +46,7 @@ that reaches it both moves its servo *and* gets captured. When done:
 saves whatever it captured as `/seq/<name>.bin` and reports back
 asynchronously (see `upload_result` below) — this can take a moment, since it
 travels Node → Master over ESP-NOW after the save completes. A Node's
-recording buffer caps at `MAX_SEQ_POINTS × RECORD_INTERVAL_MS` (60s by
+recording buffer caps at `MAX_SEQ_POINTS × RECORD_INTERVAL_MS` (10 minutes by
 default); don't stream longer than that or the excess is silently dropped.
 `scripts-tools/joystick_master_gui.py`'s "Upload to Node…" button implements
 this whole flow, including only ever sending one Node's own column from a

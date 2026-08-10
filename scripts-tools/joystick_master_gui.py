@@ -51,8 +51,8 @@ PLAYBACK_SPEED_MIN = 0.1
 PLAYBACK_SPEED_MAX = 2.0
 
 # Must match the firmware's Config.h: MAX_SEQ_POINTS * RECORD_INTERVAL_MS —
-# how long a Node's own recording buffer can hold (60s at 1200 points/50ms).
-UPLOAD_MAX_DURATION_MS = 60000
+# how long a Node's own recording buffer can hold (600s/10min at 12000 points/50ms).
+UPLOAD_MAX_DURATION_MS = 600000
 UPLOAD_ACK_TIMEOUT_MS = 4000  # how long to wait for a SEQ_ACK before retrying the stop-and-save once
 
 # SEQ_START has no delivery guarantee and, unlike an ordinary move command,

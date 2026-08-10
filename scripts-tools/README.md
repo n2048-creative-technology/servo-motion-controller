@@ -125,9 +125,12 @@ Workflow:
    [../docs/serial-protocol.md](../docs/serial-protocol.md)). The Node saves
    it and can then loop it on every boot via its own Settings → Autostart,
    completely standalone — no PC, Master, or controller needed afterward.
-   Long recordings (over 60s, a Node's own capacity) are truncated with a
-   warning. A failed/lost confirmation is retried once automatically; the
-   log and the status line next to the button show what happened.
+   Long recordings (over 10 minutes, a Node's own capacity) are truncated
+   with a warning. The start request is sent redundantly (a lost one is
+   otherwise invisible — the Node still moves on every point of the stream
+   that follows regardless of whether it actually started recording) and a
+   failed/lost stop-and-save confirmation is retried once automatically;
+   the log and the status line next to the button show what happened.
 
 The axis-mapping math, CSV round-trip, and upload data-extraction/resampling
 logic are all unit-tested, and the window itself has been launched and

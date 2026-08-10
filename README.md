@@ -235,10 +235,11 @@ rather than misbehave.
 - Servo calibration, AP credentials, and autostart config live in NVS
   (`Preferences`, versioned blob — a magic/version mismatch falls back to
   factory defaults instead of crashing).
-- The recorded sequence lives in LittleFS at `/sequence.bin` (12-byte header
-  + up to 1200 points of `{t_ms, angle*10}`, i.e. up to 60s at the 20 Hz
-  capture rate). It's only written on explicit **Save**, never per-sample, to
-  avoid flash wear.
+- Each recorded sequence lives in LittleFS at `/seq/<name>.bin` (12-byte
+  header + up to 12000 points of `{t_ms, angle*10}`, i.e. up to 10 minutes at
+  the 20 Hz capture rate — a board can hold several, named, picked for
+  autostart or manual playback). It's only written on explicit **Save**,
+  never per-sample, to avoid flash wear.
 
 ## Known limitations / risks
 

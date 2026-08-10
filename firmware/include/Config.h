@@ -31,7 +31,18 @@ static constexpr uint32_t RECORD_INTERVAL_MS = 50;  // 20 Hz recording capture
 static constexpr uint32_t STATUS_BROADCAST_MS = 100; // 10 Hz WS status push
 
 // ---- Sequence storage ----
-static constexpr uint16_t MAX_SEQ_POINTS = 1200; // 1200 * 50ms = 60s max recording
+// 12000 * 50ms = 600s (10 min) max recording. This is a fixed-size static
+// array (SequenceStore::points_, 8 bytes/point), not heap — it's carved out
+// of every board's RAM at link time whether or not it's ever filled, so
+// raising it is a firmware-wide RAM budget decision shared by every board
+// (Master and Node roles both link SequenceStore in). Sized to leave a
+// healthy safety margin against the tightest board in this project's
+// current lineup, the XIAO ESP32C3: ~193KB free heap at boot before this
+// was raised, ~86KB more of that spent on the bigger array here, still
+// ~107KB left for WiFi/AsyncWebServer/ESP-NOW/JSON's own runtime needs —
+// verified via a real ~10-minute record/save/reload round trip on hardware,
+// not just this arithmetic. See docs/serial-protocol.md.
+static constexpr uint16_t MAX_SEQ_POINTS = 12000;
 static constexpr const char *SEQUENCE_LEGACY_FILE_PATH = "/sequence.bin"; // v1 single fixed file, migrated once
 static constexpr uint32_t SEQUENCE_FILE_MAGIC = 0x51455331; // "1SEQ"
 static constexpr uint16_t SEQUENCE_FILE_VERSION = 1;
