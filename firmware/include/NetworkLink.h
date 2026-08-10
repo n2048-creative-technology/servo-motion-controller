@@ -133,6 +133,21 @@ private:
   KnownNode knownNodes_[NET_MAX_TRACKED_NODES];
   LastCommand lastCommands_[NET_MAX_LAST_COMMANDS];
 
+  // esp_now_register_recv_cb's callback runs on the WiFi driver's own
+  // FreeRTOS task, not loop()'s — invoking seqAckCb_ directly from onRecv()
+  // would call SerialBridge::reportUploadResult()'s Serial.println() from
+  // that task while loop() concurrently writes its own replies on Serial,
+  // with nothing serializing the two: the two lines' bytes can interleave
+  // into corrupted JSON the PC side can't parse (observed in practice — an
+  // upload's own success confirmation coming back garbled and unparsed).
+  // Stashing the ack here and firing seqAckCb_ from loopTick() instead
+  // keeps every Serial write on loop()'s task.
+  bool pendingSeqAck_ = false;
+  uint8_t pendingAckNodeId_ = 0;
+  char pendingAckName_[24] = {0};
+  bool pendingAckOk_ = false;
+  uint16_t pendingAckPoints_ = 0;
+
   void recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now);
   void recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t now);
   bool transmitCommand(uint8_t targetNode, float angleDeg);

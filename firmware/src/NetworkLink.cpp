@@ -68,6 +68,11 @@ void NetworkLink::loopTick(uint32_t now) {
   } else if (mode_ == OperatingMode::MASTER) {
     resendDueCommands(now);
   }
+
+  if (pendingSeqAck_) {
+    pendingSeqAck_ = false;
+    if (seqAckCb_) seqAckCb_(pendingAckNodeId_, pendingAckName_, pendingAckOk_, pendingAckPoints_);
+  }
 }
 
 bool NetworkLink::transmitCommand(uint8_t targetNode, float angleDeg) {
@@ -210,6 +215,13 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     if (seqStopCb_) seqStopCb_(pkt.seqName);
   } else if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_SEQ_ACK) {
     pkt.seqName[sizeof(pkt.seqName) - 1] = '\0';
-    if (seqAckCb_) seqAckCb_(pkt.nodeId, pkt.seqName, pkt.status == 0, pkt.pointCount);
+    // Deferred to loopTick() rather than calling seqAckCb_ here directly —
+    // see the pendingSeqAck_ fields' comment in NetworkLink.h.
+    pendingAckNodeId_ = pkt.nodeId;
+    strncpy(pendingAckName_, pkt.seqName, sizeof(pendingAckName_) - 1);
+    pendingAckName_[sizeof(pendingAckName_) - 1] = '\0';
+    pendingAckOk_ = pkt.status == 0;
+    pendingAckPoints_ = pkt.pointCount;
+    pendingSeqAck_ = true;
   }
 }

@@ -55,6 +55,18 @@ PLAYBACK_SPEED_MAX = 2.0
 UPLOAD_MAX_DURATION_MS = 60000
 UPLOAD_ACK_TIMEOUT_MS = 4000  # how long to wait for a SEQ_ACK before retrying the stop-and-save once
 
+# SEQ_START has no delivery guarantee and, unlike an ordinary move command,
+# a lost one is invisible: the Node still moves on every point of the
+# stream that follows (PlaybackEngine::onNetworkCommand writes the servo
+# unconditionally, whether or not recording actually started), so nothing
+# *looks* wrong until the save fails at the very end with zero points
+# captured. Resending the start request a few times, like the firmware
+# already does for ordinary move commands, costs nothing — the Node's
+# SequenceStore::startRecording() just resets its buffer each time — and
+# makes a single dropped packet far less likely to lose an entire upload.
+UPLOAD_START_RESENDS = 5
+UPLOAD_START_RESEND_INTERVAL_MS = 100
+
 # Must match firmware's Config.h SEQ_NAME_MAX_LEN and SequenceStore::sanitizeName.
 SEQ_NAME_MAX_LEN = 23
 _SEQ_NAME_ALLOWED_CHARS = frozenset(
@@ -1041,10 +1053,25 @@ class App:
             self._upload = None
             self.upload_status_var.set("")
             return
-        # Brief pause so the Node's SEQ_START has landed before the point
-        # stream begins (both travel the same one-at-a-time ESP-NOW queue,
-        # so this is cheap insurance, not a hard requirement).
-        self._upload_job = self.root.after(150, self._upload_send_next_point)
+        self._upload_job = self.root.after(
+            UPLOAD_START_RESEND_INTERVAL_MS, self._resend_upload_start, UPLOAD_START_RESENDS - 1
+        )
+
+    def _resend_upload_start(self, remaining):
+        if self._upload is None:
+            return
+        if remaining > 0:
+            try:
+                self.link.send({"cmd": "remote_record_start", "node": self._upload["node"]})
+            except (RuntimeError, serial.SerialException, OSError) as exc:
+                self._log(f"-- upload start resend failed: {exc} --")
+            self._upload_job = self.root.after(
+                UPLOAD_START_RESEND_INTERVAL_MS, self._resend_upload_start, remaining - 1
+            )
+        else:
+            self._upload_job = self.root.after(
+                UPLOAD_START_RESEND_INTERVAL_MS, self._upload_send_next_point
+            )
 
     def _upload_send_next_point(self):
         if self._upload is None:
