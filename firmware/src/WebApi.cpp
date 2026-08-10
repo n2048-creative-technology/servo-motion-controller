@@ -147,6 +147,7 @@ String WebApi::buildStatusJson() {
 
   JsonObject sequenceObj = doc["sequence"].to<JsonObject>();
   sequenceObj["present"] = sequence_->hasSequence();
+  sequenceObj["name"] = sequence_->activeName();
   sequenceObj["points"] = sequence_->pointCount();
   sequenceObj["duration_ms"] = sequence_->durationMs();
 
@@ -242,35 +243,63 @@ void WebApi::setupRoutes() {
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
-  server_.on("/api/record/save", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    bool ok = sequence_->saveToFS();
-    request->send(ok ? 200 : 400, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
-  });
+  server_.addHandler(new AsyncCallbackJsonWebHandler(
+      "/api/record/save", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (!json["name"].is<const char *>()) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"expected name\"}");
+          return;
+        }
+        bool ok = sequence_->saveAs(json["name"].as<const char *>());
+        request->send(ok ? 200 : 400, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
+      }));
 
   server_.on("/api/record/discard", HTTP_POST, [this](AsyncWebServerRequest *request) {
     sequence_->discardRecording();
     request->send(200, "application/json", "{\"ok\":true}");
   });
 
-  server_.on("/api/sequence", HTTP_GET, [this](AsyncWebServerRequest *request) {
+  // Every saved sequence on this board (locally recorded or uploaded via a
+  // Master) — name, size, duration. Drives the Record tab's list and the
+  // Autostart target=sequence picker in the web UI.
+  server_.on("/api/sequences", HTTP_GET, [this](AsyncWebServerRequest *request) {
     JsonDocument doc;
-    doc["present"] = sequence_->hasSequence();
-    doc["points"] = sequence_->pointCount();
-    doc["duration_ms"] = sequence_->durationMs();
+    JsonArray arr = doc.to<JsonArray>();
+    SequenceInfo infos[SEQ_MAX_LISTED];
+    uint8_t n = sequence_->listSequences(infos, SEQ_MAX_LISTED);
+    for (uint8_t i = 0; i < n; i++) {
+      JsonObject obj = arr.add<JsonObject>();
+      obj["name"] = infos[i].name;
+      obj["points"] = infos[i].points;
+      obj["duration_ms"] = infos[i].durationMs;
+    }
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
   });
 
-  server_.on("/api/sequence/play", HTTP_POST, [this](AsyncWebServerRequest *request) {
-    playback_->startSequencePlayback(millis());
-    request->send(200, "application/json", "{\"ok\":true}");
-  });
+  server_.addHandler(new AsyncCallbackJsonWebHandler(
+      "/api/sequence/play", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (!json["name"].is<const char *>() || !sequence_->loadNamed(json["name"].as<const char *>())) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"unknown sequence\"}");
+          return;
+        }
+        playback_->startSequencePlayback(millis());
+        request->send(200, "application/json", "{\"ok\":true}");
+      }));
 
   server_.on("/api/sequence/stop", HTTP_POST, [this](AsyncWebServerRequest *request) {
     playback_->stopSequencePlayback();
     request->send(200, "application/json", "{\"ok\":true}");
   });
+
+  server_.addHandler(new AsyncCallbackJsonWebHandler(
+      "/api/sequence/delete", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (!json["name"].is<const char *>() || !sequence_->deleteSequence(json["name"].as<const char *>())) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"delete failed\"}");
+          return;
+        }
+        request->send(200, "application/json", "{\"ok\":true}");
+      }));
 
   server_.on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest *request) {
     const PersistedSettings &s = settingsStore_->settings();
@@ -294,6 +323,7 @@ void WebApi::setupRoutes() {
                            : s.autostartTarget == AutostartTarget::SEQUENCE ? "sequence"
                                                                              : "none";
     writePatternParams(autostart["pattern"].to<JsonObject>(), s.autostartPattern);
+    autostart["sequence_name"] = s.autostartSequenceName;
 
     JsonObject network = doc["network"].to<JsonObject>();
     network["mode"] = networkModeToString(s.networkMode);
@@ -357,6 +387,10 @@ void WebApi::setupRoutes() {
         }
         if (json["autostart"]["pattern"].is<JsonObject>()) {
           s.autostartPattern = parsePatternParams(json["autostart"]["pattern"], s.autostartPattern);
+        }
+        if (json["autostart"]["sequence_name"].is<const char *>()) {
+          strncpy(s.autostartSequenceName, json["autostart"]["sequence_name"].as<const char *>(),
+                   sizeof(s.autostartSequenceName) - 1);
         }
 
         if (json["network"]["mode"].is<const char *>()) {

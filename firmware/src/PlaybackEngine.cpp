@@ -105,6 +105,7 @@ void PlaybackEngine::applyAutostart(const PersistedSettings &settings, uint32_t 
   if (settings.autostartTarget == AutostartTarget::PATTERN) {
     startPattern(settings.autostartPattern, now);
   } else if (settings.autostartTarget == AutostartTarget::SEQUENCE) {
+    sequence_->loadNamed(settings.autostartSequenceName);
     startSequencePlayback(now);
   }
 }

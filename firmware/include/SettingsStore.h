@@ -38,6 +38,7 @@ struct PersistedSettings {
   bool autostartEnabled = false;
   AutostartTarget autostartTarget = AutostartTarget::NONE;
   PatternParams autostartPattern;
+  char autostartSequenceName[24] = {0}; // which /seq/<name>.bin to loop, when target == SEQUENCE
 
   OperatingMode networkMode = OperatingMode::STANDALONE;
   uint8_t nodeId = NET_NODE_ID_MIN;

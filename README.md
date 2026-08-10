@@ -176,6 +176,20 @@ Settings → Network, all three modes:
 
   <img src="images/pytool-joystick-gui.png" alt="joystick_master_gui.py: controller detected, axis readout, mapping table" width="420">
 
+  **A performance doesn't have to stay tied to the PC.** `joystick_master_gui.py`'s
+  **Upload to Node…** button takes a loaded CSV or a just-made recording,
+  picks one Node ID present in it, and streams *only that Node's own column*
+  through the Master to be saved on the Node's own flash under a name —
+  other Nodes' data in the same recording is never sent to it. That Node's
+  own Settings → Autostart can then pick any of its saved sequences (see the
+  Record tab's list — locally recorded or uploaded, they show up the same
+  way) to loop on every boot, completely standalone: no PC, no Master, no
+  controller needed afterward. See
+  [docs/serial-protocol.md](docs/serial-protocol.md)'s
+  `remote_record_start`/`remote_record_stop` for the underlying protocol —
+  it's implemented as a remotely-triggered recording, reusing the same
+  RECORDING-mode capture path a Node's own web UI already uses.
+
 How it works: Master and Nodes talk over **ESP-NOW** (direct ESP32-to-ESP32
 radio, no router involved), broadcasting on the same fixed AP WiFi channel
 every board already uses (`AP_WIFI_CHANNEL` in `firmware/include/Config.h`).
@@ -259,6 +273,16 @@ rather than misbehave.
   confirming in the field that a Node recovers on its own within
   ~300-550ms of the interference easing, without needing a reboot, and that
   it no longer snaps backward to a stale angle while doing so.
+- Remote sequence upload (`remote_record_start`/`remote_record_stop`, and
+  `joystick_master_gui.py`'s Upload to Node… button) is build-verified only —
+  it bumped `NET_PACKET_VERSION` again (every board needs reflashing to stay
+  in sync, same as the ordering fix above) and reuses well-exercised
+  machinery (RECORDING mode, `resample_rows`), but the actual PC → Master →
+  Node round trip, the on-Node save, and autostart picking it back up after
+  a reboot haven't been exercised hands-on for the same no-WiFi-adapter
+  reason as the rest of Master/Node mode. Worth a real end-to-end check:
+  upload something, confirm it shows up in that Node's Settings → Autostart
+  sequence picker, and that it survives a reboot.
 - The web UI screenshots above were captured by serving `firmware/data/`
   through a local mock API (canned JSON standing in for the ESP32's
   responses) and driving a real headless Chromium over it — real rendering

@@ -71,18 +71,24 @@
         <button id="recStart" class="btn btn-go">Start Recording</button>
         <button id="recStop" class="btn btn-stop">Stop Recording</button>
       </div>
-      <div class="btnrow">
+      <div class="targetrow">
+        <input id="recName" type="text" maxlength="23" placeholder="sequence name">
         <button id="recSave" class="btn btn-primary">Save</button>
+      </div>
+      <div class="btnrow">
         <button id="recDiscard" class="btn btn-danger">Discard</button>
       </div>
     </div>
 
     <div class="card">
-      <h2>Saved Sequence</h2>
-      <div id="seqInfo" class="hint">no sequence saved</div>
+      <h2>Saved Sequences</h2>
+      <p class="hint">Locally recorded above, or uploaded from a PC through a Master — either way they end up here and can be picked for Autostart in Settings.</p>
+      <table id="seqTable" class="nodetable">
+        <thead><tr><th>Name</th><th>Points</th><th>Duration</th><th></th></tr></thead>
+        <tbody id="seqBody"><tr><td colspan="4">no sequences saved</td></tr></tbody>
+      </table>
       <div class="btnrow">
-        <button id="seqPlay" class="btn btn-go">Play Loop</button>
-        <button id="seqStop" class="btn btn-stop">Stop</button>
+        <button id="seqStop" class="btn btn-stop">Stop Playback</button>
       </div>
     </div>
   </section>
@@ -141,6 +147,10 @@
         <select id="asPatternType"></select>
       </label>
       <div id="asPatternParams" class="paramgrid"></div>
+      <label class="field" id="asSequenceField">
+        <span>Sequence</span>
+        <select id="asSequenceName"></select>
+      </label>
       <div class="btnrow">
         <button id="asSave" class="btn btn-primary">Save Autostart</button>
       </div>

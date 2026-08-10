@@ -27,6 +27,16 @@ static const IPAddress AP_NETMASK(255, 255, 255, 0);
 
 uint32_t lastTickMs = 0;
 
+// Role wiring (networkLink.begin/serialBridge.begin/sink selection below)
+// only happens once here in setup(), matching the documented "network.*
+// changes need a reboot" behavior. POST /api/settings can flip
+// settingsStore's live networkMode in RAM immediately, well before any
+// reboot — loop() must keep gating on this boot-time snapshot rather than
+// re-reading live settings, or it starts calling serialBridge.loopTick()
+// against a SerialBridge whose network_ pointer was never set (begin()
+// never ran for the new role), crashing on the first PC command.
+OperatingMode bootNetworkMode = OperatingMode::STANDALONE;
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -35,6 +45,7 @@ void setup() {
 
   settingsStore.load();
   const PersistedSettings &settings = settingsStore.settings();
+  bootNetworkMode = settings.networkMode;
   Serial.printf("[SELFTEST] settings loaded (version=%u, autostart=%d)\n", settings.version,
                 settings.autostartEnabled ? 1 : 0);
 
@@ -48,13 +59,9 @@ void setup() {
   Serial.printf("[SELFTEST] littlefs mount %s\n", fsOk ? "OK" : "FAILED");
 
   sequenceStore.begin();
-  bool seqLoaded = sequenceStore.loadFromFS();
-  if (seqLoaded) {
-    Serial.printf("[SELFTEST] sequence file: present, %u points, %ums\n", sequenceStore.pointCount(),
-                  sequenceStore.durationMs());
-  } else {
-    Serial.println("[SELFTEST] sequence file: none");
-  }
+  SequenceInfo seqInfos[SEQ_MAX_LISTED];
+  uint8_t seqCount = sequenceStore.listSequences(seqInfos, SEQ_MAX_LISTED);
+  Serial.printf("[SELFTEST] sequences stored: %u\n", seqCount);
 
   WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
@@ -75,8 +82,27 @@ void setup() {
     networkAngleSink.begin(&networkLink);
     sink = &networkAngleSink;
     serialBridge.begin(&networkLink);
+    networkLink.onSeqAck([](uint8_t nodeId, const char *name, bool ok, uint16_t points) {
+      serialBridge.reportUploadResult(nodeId, name, ok, points);
+    });
   } else if (settings.networkMode == OperatingMode::NODE) {
     networkLink.onNodeCommand([](float angleDeg) { playback.onNetworkCommand(angleDeg, millis()); });
+    // A Master remotely uploading a sequence is just a remotely-triggered
+    // recording: start/stop reuse the exact same PlaybackEngine/SequenceStore
+    // calls the local /api/record/start|save routes make (see WebApi.cpp) —
+    // the servo moves and the buffer fills via the ordinary RECORDING-mode
+    // path in PlaybackEngine::tick(), since onNetworkCommand already leaves
+    // RECORDING mode untouched.
+    networkLink.onSeqStart([]() {
+      sequenceStore.startRecording();
+      playback.startRecording(millis());
+    });
+    networkLink.onSeqStop([](const char *name) {
+      playback.stopRecording();
+      sequenceStore.stopRecording();
+      bool ok = sequenceStore.saveAs(name);
+      networkLink.sendSeqAck(name, ok, sequenceStore.recordedPointCount());
+    });
   }
   playback.begin(sink, &sequenceStore);
 
@@ -108,7 +134,7 @@ void loop() {
   }
 
   networkLink.loopTick(now);
-  if (settingsStore.settings().networkMode == OperatingMode::MASTER) {
+  if (bootNetworkMode == OperatingMode::MASTER) {
     serialBridge.loopTick();
   }
 

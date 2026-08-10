@@ -212,6 +212,15 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   border-radius: 8px;
   color: var(--text);
 }
+.targetrow input[type="text"] {
+  flex: 1;
+  padding: 10px 12px;
+  font-size: 1rem;
+  background: #14161a;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  color: var(--text);
+}
 .targetrow .btn { flex: 1; }
 
 .nodetable {
@@ -227,6 +236,13 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   font-size: 0.85rem;
 }
 .nodetable th { color: var(--text-dim); font-weight: 600; }
+.nodetable .btn {
+  flex: none;
+  padding: 6px 10px;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  margin-right: 4px;
+}
 
 .tabbar {
   position: fixed;

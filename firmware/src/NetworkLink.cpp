@@ -107,6 +107,34 @@ void NetworkLink::recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t
   lastCommands_[slot].inUse = true;
 }
 
+bool NetworkLink::sendSeqStart(uint8_t targetNode) {
+  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
+  NetPacket pkt;
+  pkt.type = NET_PACKET_TYPE_SEQ_START;
+  pkt.targetNode = targetNode;
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::sendSeqStop(uint8_t targetNode, const char *name) {
+  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
+  NetPacket pkt;
+  pkt.type = NET_PACKET_TYPE_SEQ_STOP;
+  pkt.targetNode = targetNode;
+  strncpy(pkt.seqName, name, sizeof(pkt.seqName) - 1);
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::sendSeqAck(const char *name, bool ok, uint16_t pointCount) {
+  if (!espNowReady_ || mode_ != OperatingMode::NODE) return false;
+  NetPacket pkt;
+  pkt.type = NET_PACKET_TYPE_SEQ_ACK;
+  pkt.nodeId = nodeId_;
+  strncpy(pkt.seqName, name, sizeof(pkt.seqName) - 1);
+  pkt.status = ok ? 0 : 1;
+  pkt.pointCount = pointCount;
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
 void NetworkLink::resendDueCommands(uint32_t now) {
   for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
     LastCommand &cmd = lastCommands_[i];
@@ -173,5 +201,15 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     lastSessionId_ = pkt.sessionId;
     lastAppliedSeq_ = pkt.seq;
     if (nodeCommandCb_) nodeCommandCb_(pkt.angleDeg);
+  } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_START) {
+    if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
+    if (seqStartCb_) seqStartCb_();
+  } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_STOP) {
+    if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
+    pkt.seqName[sizeof(pkt.seqName) - 1] = '\0'; // defensive: never trust a wire string is terminated
+    if (seqStopCb_) seqStopCb_(pkt.seqName);
+  } else if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_SEQ_ACK) {
+    pkt.seqName[sizeof(pkt.seqName) - 1] = '\0';
+    if (seqAckCb_) seqAckCb_(pkt.nodeId, pkt.seqName, pkt.status == 0, pkt.pointCount);
   }
 }

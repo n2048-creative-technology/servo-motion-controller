@@ -29,10 +29,42 @@ Returns the Master's in-RAM table of Nodes it has heard a heartbeat from
 `firmware/include/Config.h`). Entries aren't actively expired; treat a large
 `age_ms` as "probably offline".
 
+**Upload a sequence to a Node** — remotely triggers a recording on that Node
+(same effect as its own web UI's Record tab), so it ends up saved on the
+Node's own flash under a name, playable standalone via that Node's Settings
+→ Autostart with no PC/Master/controller involved afterward:
+```json
+{"cmd": "remote_record_start", "node": 3}
+```
+Then stream ordinary move commands (`{"node":3,"angle":...}`, above) at a
+steady real-time pace — the Node is now in RECORDING mode, so every command
+that reaches it both moves its servo *and* gets captured. When done:
+```json
+{"cmd": "remote_record_stop", "node": 3, "name": "dance1"}
+```
+`name` is sanitized to `[A-Za-z0-9_-]`, truncated to 23 characters. The Node
+saves whatever it captured as `/seq/<name>.bin` and reports back
+asynchronously (see `upload_result` below) — this can take a moment, since it
+travels Node → Master over ESP-NOW after the save completes. A Node's
+recording buffer caps at `MAX_SEQ_POINTS × RECORD_INTERVAL_MS` (60s by
+default); don't stream longer than that or the excess is silently dropped.
+`scripts-tools/joystick_master_gui.py`'s "Upload to Node…" button implements
+this whole flow, including only ever sending one Node's own column from a
+multi-node recording (see its README).
+
 ## Replies (Master → PC)
 
 - Move command: `{"ok":true}` or `{"ok":false,"error":"..."}`
 - `list`: `{"type":"nodes","nodes":[{"id":3,"angle":120.5,"age_ms":840}, ...]}`
+- `remote_record_start`/`remote_record_stop`: `{"ok":true}` once the ESP-NOW
+  send itself succeeded — *not* confirmation the Node actually saved
+  anything, that's the separate asynchronous `upload_result` below.
+- `upload_result` (asynchronous, arrives whenever the Node's own SEQ_ACK
+  makes it back — could be well after the `remote_record_stop` reply):
+  `{"type":"upload_result","node":3,"name":"dance1","ok":true,"points":842}`.
+  `ok:false` means the Node received the stop request but failed to save
+  (e.g. an invalid name); no reply at all after a few seconds means the
+  stop request itself likely didn't arrive — resend it.
 - Malformed line: `{"ok":false,"error":"bad_json"}`
 
 Every reply is also one line, `\n`-terminated.

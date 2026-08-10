@@ -50,6 +50,28 @@ MAX_LOG_LINES = 500
 PLAYBACK_SPEED_MIN = 0.1
 PLAYBACK_SPEED_MAX = 2.0
 
+# Must match the firmware's Config.h: MAX_SEQ_POINTS * RECORD_INTERVAL_MS —
+# how long a Node's own recording buffer can hold (60s at 1200 points/50ms).
+UPLOAD_MAX_DURATION_MS = 60000
+UPLOAD_ACK_TIMEOUT_MS = 4000  # how long to wait for a SEQ_ACK before retrying the stop-and-save once
+
+# Must match firmware's Config.h SEQ_NAME_MAX_LEN and SequenceStore::sanitizeName.
+SEQ_NAME_MAX_LEN = 23
+_SEQ_NAME_ALLOWED_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+)
+
+
+def sanitize_sequence_name(name):
+    """Mirrors the firmware's SequenceStore::sanitizeName exactly. The Node
+    saves an uploaded sequence under this sanitized form and echoes it back
+    verbatim in its SEQ_ACK — sending anything else (e.g. a name over 23
+    chars, or containing a space) makes the ack's name never match what we
+    sent, so a successful upload looks stuck/failed until the ack timeout
+    (see App._on_upload_ack). Sanitizing client-side before sending avoids
+    that mismatch entirely."""
+    return "".join(c for c in name if c in _SEQ_NAME_ALLOWED_CHARS)[:SEQ_NAME_MAX_LEN]
+
 
 class AxisMapping:
     """One learned (controller, axis) -> Node link, with its raw and output
@@ -399,11 +421,110 @@ class LearnDialog(tk.Toplevel):
         ttk.Button(btns, text="Save Mapping", command=save).pack(side="left")
 
 
+class UploadDialog(tk.Toplevel):
+    """Picks a source (loaded CSV or the last live recording), a single Node
+    ID present in it, and a name — then hands that off to the caller, which
+    does the actual streaming. Only that Node's own column is ever sent (see
+    App._begin_upload), matching the "each Node only gets its own data"
+    requirement."""
+
+    def __init__(self, parent, csv_rows, record_rows, on_confirm):
+        super().__init__(parent)
+        self.title("Upload sequence to a Node")
+        self.resizable(False, False)
+        self.csv_rows = csv_rows
+        self.record_rows = record_rows
+        self.on_confirm = on_confirm
+
+        form = ttk.Frame(self, padding=12)
+        form.pack()
+
+        ttk.Label(form, text="Source:").grid(row=0, column=0, sticky="w")
+        self.source_var = tk.StringVar()
+        source_options = []
+        if self.record_rows:
+            source_options.append(f"Last recording ({len(self.record_rows)} samples)")
+        if self.csv_rows:
+            source_options.append(f"Loaded CSV ({len(self.csv_rows)} rows)")
+        self.source_combo = ttk.Combobox(form, textvariable=self.source_var, values=source_options, state="readonly", width=28)
+        self.source_combo.grid(row=0, column=1, sticky="w", padx=(4, 0))
+        self.source_combo.bind("<<ComboboxSelected>>", lambda e: self._refresh_node_choices())
+
+        ttk.Label(form, text="Node ID:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.node_var = tk.StringVar()
+        self.node_combo = ttk.Combobox(form, textvariable=self.node_var, state="readonly", width=28)
+        self.node_combo.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
+
+        ttk.Label(form, text="Sequence name:").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.name_var = tk.StringVar()
+        ttk.Entry(form, textvariable=self.name_var, width=30).grid(row=2, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
+
+        self.hint_var = tk.StringVar(value="")
+        ttk.Label(form, textvariable=self.hint_var, foreground="#666", wraplength=320).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+
+        btns = ttk.Frame(form)
+        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Start Upload", command=self._confirm).pack(side="left")
+
+        if source_options:
+            self.source_var.set(source_options[0])
+            self._refresh_node_choices()
+        else:
+            self.hint_var.set("Nothing to upload — record something or load a CSV first.")
+
+    def _current_rows(self):
+        if self.source_var.get().startswith("Last recording"):
+            return self.record_rows
+        if self.source_var.get().startswith("Loaded CSV"):
+            return self.csv_rows
+        return []
+
+    def _refresh_node_choices(self):
+        rows = self._current_rows()
+        node_ids = sorted({nid for _, sample in rows for nid in sample})
+        self.node_combo["values"] = [str(n) for n in node_ids]
+        if node_ids:
+            self.node_var.set(str(node_ids[0]))
+        duration_s = (rows[-1][0] / 1000.0) if rows else 0.0
+        over = duration_s * 1000 > UPLOAD_MAX_DURATION_MS
+        self.hint_var.set(
+            f"{duration_s:.1f}s of motion."
+            + (f" Only the selected Node's own column is sent — the others are never transmitted to it."
+               if node_ids else "")
+            + (f" Longer than the {UPLOAD_MAX_DURATION_MS/1000:.0f}s a Node can hold; it'll be truncated."
+               if over else "")
+        )
+
+    def _confirm(self):
+        rows = self._current_rows()
+        if not rows:
+            messagebox.showerror("No source", "Pick a source with data first.", parent=self)
+            return
+        try:
+            node_id = int(self.node_var.get())
+        except (ValueError, TypeError):
+            messagebox.showerror("No Node", "Pick a Node ID first.", parent=self)
+            return
+        name = sanitize_sequence_name(self.name_var.get().strip())
+        if not name:
+            messagebox.showerror(
+                "No name",
+                "Enter a sequence name using letters, numbers, '_' or '-' (max 23 characters).",
+                parent=self,
+            )
+            return
+        self.on_confirm(rows, node_id, name)
+        self.destroy()
+
+
 class App:
     def __init__(self, root):
         self.root = root
         root.title("Servo Rig — Joystick Bridge")
-        root.geometry("720x640")
+        root.geometry("720x760")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         pygame.init()
@@ -425,6 +546,9 @@ class App:
         self._playback_plan = []  # resample_rows(playback_rows, ...) at the speed Play was pressed with
         self.playback_index = 0
         self._playback_job = None
+
+        self._upload = None  # in-progress upload state dict, or None — see _begin_upload
+        self._upload_job = None
 
         self._build_widgets()
         self._refresh_ports()
@@ -524,6 +648,15 @@ class App:
         self.playback_status_var = tk.StringVar(value="no CSV loaded")
         ttk.Label(rec, textvariable=self.playback_status_var, foreground="#666").grid(
             row=2, column=0, columnspan=6, sticky="w", pady=(6, 0)
+        )
+
+        ttk.Separator(rec, orient="horizontal").grid(row=3, column=0, columnspan=6, sticky="ew", pady=8)
+        ttk.Button(rec, text="Upload to Node…", command=self._open_upload_dialog).grid(
+            row=4, column=0, columnspan=2, sticky="w"
+        )
+        self.upload_status_var = tk.StringVar(value="")
+        ttk.Label(rec, textvariable=self.upload_status_var, foreground="#666").grid(
+            row=4, column=2, columnspan=4, sticky="w"
         )
 
         log_frame = ttk.LabelFrame(self.root, text="Serial log", padding=8)
@@ -869,6 +1002,126 @@ class App:
             self.root.after_cancel(self._playback_job)
             self._playback_job = None
 
+    # ---------- upload to Node ----------
+    def _open_upload_dialog(self):
+        if not self.link.is_open:
+            messagebox.showwarning("Not connected", "Connect to the Master's serial port first.")
+            return
+        if self._upload is not None:
+            messagebox.showwarning("Upload in progress", "Wait for the current upload to finish first.")
+            return
+        if not self.playback_rows and not self.record_buffer:
+            messagebox.showwarning("Nothing to upload", "Record something or load a CSV first.")
+            return
+        UploadDialog(self.root, self.playback_rows, self.record_buffer, self._begin_upload)
+
+    def _begin_upload(self, rows, node_id, name):
+        points = [(t, s[node_id]) for t, s in rows if node_id in s]
+        if not points:
+            messagebox.showerror("Upload failed", f"No data for Node {node_id} in the selected source.")
+            return
+        if points[-1][0] > UPLOAD_MAX_DURATION_MS:
+            points = [(t, a) for t, a in points if t <= UPLOAD_MAX_DURATION_MS]
+            self._log(f"-- upload truncated to {UPLOAD_MAX_DURATION_MS / 1000:.0f}s (Node capacity) --")
+
+        # Resample to a dense, single-node point list at real-time pace —
+        # the same mechanism CSV playback uses, just targeting one Node and
+        # never touching the other columns (only this Node's data is ever
+        # transmitted to it).
+        single_node_rows = [(t, {node_id: a}) for t, a in points]
+        plan = resample_rows(single_node_rows, TICK_INTERVAL_MS, 1.0)
+
+        self._upload = {"node": node_id, "name": name, "plan": plan, "index": 0, "retried": False}
+        self.upload_status_var.set(f"uploading '{name}' to Node {node_id}… 0/{len(plan)}")
+        self._log(f"-- upload starting: Node {node_id} as '{name}' ({len(plan)} points) --")
+        try:
+            self.link.send({"cmd": "remote_record_start", "node": node_id})
+        except (RuntimeError, serial.SerialException, OSError) as exc:
+            self._log(f"-- upload failed to start: {exc} --")
+            self._upload = None
+            self.upload_status_var.set("")
+            return
+        # Brief pause so the Node's SEQ_START has landed before the point
+        # stream begins (both travel the same one-at-a-time ESP-NOW queue,
+        # so this is cheap insurance, not a hard requirement).
+        self._upload_job = self.root.after(150, self._upload_send_next_point)
+
+    def _upload_send_next_point(self):
+        if self._upload is None:
+            return
+        plan = self._upload["plan"]
+        idx = self._upload["index"]
+        if idx >= len(plan):
+            self._finish_upload_stream()
+            return
+
+        t_ms, sample = plan[idx]
+        angle = sample[self._upload["node"]]
+        try:
+            self.link.send({"node": self._upload["node"], "angle": round(angle, 1)})
+        except (RuntimeError, serial.SerialException, OSError) as exc:
+            self._log(f"-- upload send failed, aborting: {exc} --")
+            self.upload_status_var.set("upload failed (send error)")
+            self._upload = None
+            return
+
+        self._upload["index"] = idx + 1
+        self.upload_status_var.set(
+            f"uploading '{self._upload['name']}' to Node {self._upload['node']}… {idx + 1}/{len(plan)}"
+        )
+
+        next_idx = idx + 1
+        delay_ms = max(1, plan[next_idx][0] - t_ms) if next_idx < len(plan) else 1
+        self._upload_job = self.root.after(delay_ms, self._upload_send_next_point)
+
+    def _finish_upload_stream(self):
+        if self._upload is None:
+            return
+        self._log(f"-- upload stream sent, asking Node {self._upload['node']} to save as '{self._upload['name']}' --")
+        try:
+            self.link.send({"cmd": "remote_record_stop", "node": self._upload["node"], "name": self._upload["name"]})
+        except (RuntimeError, serial.SerialException, OSError) as exc:
+            self._log(f"-- upload save request failed: {exc} --")
+            self.upload_status_var.set("upload failed (send error)")
+            self._upload = None
+            return
+        self.upload_status_var.set("waiting for the Node to confirm the save…")
+        self._upload_job = self.root.after(UPLOAD_ACK_TIMEOUT_MS, self._on_upload_ack_timeout)
+
+    def _on_upload_ack_timeout(self):
+        if self._upload is None:
+            return
+        if self._upload["retried"]:
+            self._log("-- no upload confirmation received (retried once) — it may not have saved --")
+            self.upload_status_var.set("no confirmation received — check the Node")
+            self._upload = None
+            return
+        self._log("-- no upload confirmation yet, retrying the save request once --")
+        self._upload["retried"] = True
+        try:
+            self.link.send({"cmd": "remote_record_stop", "node": self._upload["node"], "name": self._upload["name"]})
+        except (RuntimeError, serial.SerialException, OSError):
+            pass
+        self._upload_job = self.root.after(UPLOAD_ACK_TIMEOUT_MS, self._on_upload_ack_timeout)
+
+    def _on_upload_ack(self, msg):
+        if self._upload is None or msg.get("node") != self._upload["node"] or msg.get("name") != self._upload["name"]:
+            return  # stray/unrelated ack — ignore rather than clobber an unrelated in-progress upload
+        if self._upload_job is not None:
+            self.root.after_cancel(self._upload_job)
+            self._upload_job = None
+        ok = bool(msg.get("ok"))
+        points = msg.get("points", 0)
+        name = msg.get("name")
+        node = msg.get("node")
+        if ok:
+            self._log(f"-- upload confirmed: Node {node} saved '{name}' ({points} points) --")
+            self.upload_status_var.set(f"'{name}' saved on Node {node} ({points} points)")
+        else:
+            self._log(f"-- upload failed on Node {node}: could not save '{name}' --")
+            self.upload_status_var.set(f"Node {node} failed to save '{name}'")
+        self._upload = None
+
     # ---------- incoming serial data ----------
     def _drain_incoming(self):
         try:
@@ -891,6 +1144,8 @@ class App:
             return
         if isinstance(msg, dict) and msg.get("type") == "nodes":
             self.known_nodes = {n["id"]: n for n in msg.get("nodes", []) if "id" in n}
+        elif isinstance(msg, dict) and msg.get("type") == "upload_result":
+            self._on_upload_ack(msg)
 
     def _log(self, line):
         self.log_text.configure(state="normal")
@@ -907,6 +1162,8 @@ class App:
             self.root.after_cancel(self._tick_job)
         if self._node_poll_job is not None:
             self.root.after_cancel(self._node_poll_job)
+        if self._upload_job is not None:
+            self.root.after_cancel(self._upload_job)
         self._stop_playback()
         self.link.disconnect()
         pygame.quit()

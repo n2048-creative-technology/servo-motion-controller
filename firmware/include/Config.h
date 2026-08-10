@@ -32,15 +32,19 @@ static constexpr uint32_t STATUS_BROADCAST_MS = 100; // 10 Hz WS status push
 
 // ---- Sequence storage ----
 static constexpr uint16_t MAX_SEQ_POINTS = 1200; // 1200 * 50ms = 60s max recording
-static constexpr const char *SEQUENCE_FILE_PATH = "/sequence.bin";
+static constexpr const char *SEQUENCE_LEGACY_FILE_PATH = "/sequence.bin"; // v1 single fixed file, migrated once
 static constexpr uint32_t SEQUENCE_FILE_MAGIC = 0x51455331; // "1SEQ"
 static constexpr uint16_t SEQUENCE_FILE_VERSION = 1;
+static constexpr const char *SEQUENCE_DIR = "/seq"; // v2+: one "<name>.bin" file per named sequence
+static constexpr uint8_t SEQ_NAME_MAX_LEN = 23;      // + null terminator = sizeof(NetPacket::seqName)
+static constexpr uint8_t SEQ_MAX_LISTED = 16;        // cap for directory listing / UI dropdowns
+static constexpr const char *SEQUENCE_LEGACY_MIGRATED_NAME = "local";
 
 // ---- Settings / NVS ----
 static constexpr const char *NVS_NAMESPACE = "app";
 static constexpr const char *NVS_KEY = "cfg";
 static constexpr uint32_t SETTINGS_MAGIC = 0x53565831; // "1XVS"
-static constexpr uint16_t SETTINGS_VERSION = 3; // v3: added servoInvert (older blobs fall back to defaults)
+static constexpr uint16_t SETTINGS_VERSION = 4; // v4: added autostartSequenceName (older blobs fall back to defaults)
 
 // ---- WiFi AP defaults ----
 static constexpr const char *AP_SSID_PREFIX = "ServoRig-";
@@ -56,7 +60,7 @@ static constexpr const char *FIRMWARE_VERSION = "2.0.0";
 
 // ---- Master/Node network (ESP-NOW) ----
 static constexpr uint8_t NET_PACKET_MAGIC = 0xE5;
-static constexpr uint8_t NET_PACKET_VERSION = 2; // v2: added sessionId/seq (stale/out-of-order CMD rejection)
+static constexpr uint8_t NET_PACKET_VERSION = 3; // v3: added SEQ_START/SEQ_STOP/SEQ_ACK (remote sequence upload)
 static constexpr uint8_t NET_BROADCAST_NODE = 0; // targetNode value meaning "all nodes"
 static constexpr uint8_t NET_NODE_ID_MIN = 1;
 static constexpr uint8_t NET_NODE_ID_MAX = 250;

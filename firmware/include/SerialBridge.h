@@ -15,6 +15,9 @@ public:
   // Call every loop() iteration; non-blocking, buffers partial lines.
   void loopTick();
 
+  // Relays a SEQ_ACK (from NetworkLink::onSeqAck) to the PC as one JSON line.
+  void reportUploadResult(uint8_t nodeId, const char *name, bool ok, uint16_t points);
+
 private:
   static constexpr size_t kLineBufSize = 256;
 

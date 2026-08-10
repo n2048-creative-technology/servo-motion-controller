@@ -116,8 +116,23 @@ Workflow:
    above 1.0 it interpolates *down* to ~25 Hz instead of bursting every
    original row as fast as possible. Either way playback always lands
    exactly on the final recorded position.
+7. **Upload to Node…** pushes a recording onto a Node's own flash instead of
+   just replaying it live: pick a source (the loaded CSV or your last live
+   recording), a single Node ID present in it, and a name. Only that Node's
+   own column is ever sent — the other Nodes' data in the same recording
+   never reaches it — streamed through the Master at real-time pace (via
+   `remote_record_start`/`remote_record_stop`, see
+   [../docs/serial-protocol.md](../docs/serial-protocol.md)). The Node saves
+   it and can then loop it on every boot via its own Settings → Autostart,
+   completely standalone — no PC, Master, or controller needed afterward.
+   Long recordings (over 60s, a Node's own capacity) are truncated with a
+   warning. A failed/lost confirmation is retried once automatically; the
+   log and the status line next to the button show what happened.
 
-Not hands-on verified in the sandbox this was built in (no display server,
-no physical controller attached) — the axis-mapping math and CSV
-round-trip are logic-tested, but the actual Tkinter/pygame window hasn't
-been visually driven. Try a real controller before relying on it for a show.
+The axis-mapping math, CSV round-trip, and upload data-extraction/resampling
+logic are all unit-tested, and the window itself has been launched and
+visually confirmed on a real display with two real controllers connected
+simultaneously (an Xbox pad and a Logitech joystick) — but the Upload to
+Node… flow's actual PC → Master → Node round trip hasn't been exercised
+against real hardware in this sandbox (no WiFi adapter here to complete
+that loop). Try a real upload before relying on it for a show.

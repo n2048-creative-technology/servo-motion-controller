@@ -1,6 +1,8 @@
 #include "SequenceStore.h"
 
+#include <Arduino.h>
 #include <LittleFS.h>
+#include <string.h>
 
 namespace {
 struct FileHeader {
@@ -16,6 +18,51 @@ void SequenceStore::begin() {
   durationMs_ = 0;
   recording_ = false;
   loaded_ = false;
+  activeName_[0] = '\0';
+
+  if (!LittleFS.exists(SEQUENCE_DIR)) LittleFS.mkdir(SEQUENCE_DIR);
+  migrateLegacyFile();
+}
+
+void SequenceStore::migrateLegacyFile() {
+  char newPath[40];
+  pathFor(SEQUENCE_LEGACY_MIGRATED_NAME, newPath, sizeof(newPath));
+  if (LittleFS.exists(newPath)) return; // already migrated (or a "local" sequence already exists)
+  if (!LittleFS.exists(SEQUENCE_LEGACY_FILE_PATH)) return; // nothing to migrate
+
+  File in = LittleFS.open(SEQUENCE_LEGACY_FILE_PATH, "r");
+  if (!in) return;
+  File out = LittleFS.open(newPath, "w");
+  if (!out) {
+    in.close();
+    return;
+  }
+
+  uint8_t buf[256];
+  int n;
+  while ((n = in.read(buf, sizeof(buf))) > 0) {
+    out.write(buf, n);
+  }
+  in.close();
+  out.close();
+  LittleFS.remove(SEQUENCE_LEGACY_FILE_PATH);
+  Serial.printf("[SEQ] migrated legacy sequence file to %s\n", newPath);
+}
+
+void SequenceStore::pathFor(const char *name, char *out, size_t outLen) {
+  snprintf(out, outLen, "%s/%s.bin", SEQUENCE_DIR, name);
+}
+
+bool SequenceStore::sanitizeName(const char *in, char *out, size_t outLen) {
+  if (!in || outLen == 0) return false;
+  size_t j = 0;
+  for (size_t i = 0; in[i] != '\0' && j < outLen - 1 && j < SEQ_NAME_MAX_LEN; i++) {
+    char c = in[i];
+    bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+    if (ok) out[j++] = c;
+  }
+  out[j] = '\0';
+  return j > 0;
 }
 
 void SequenceStore::startRecording() {
@@ -42,10 +89,15 @@ void SequenceStore::discardRecording() {
   recording_ = false;
 }
 
-bool SequenceStore::saveToFS() {
+bool SequenceStore::saveAs(const char *name) {
   if (count_ == 0) return false;
+  char safeName[SEQ_NAME_MAX_LEN + 1];
+  if (!sanitizeName(name, safeName, sizeof(safeName))) return false;
 
-  File f = LittleFS.open(SEQUENCE_FILE_PATH, "w");
+  char path[40];
+  pathFor(safeName, path, sizeof(path));
+
+  File f = LittleFS.open(path, "w");
   if (!f) return false;
 
   FileHeader header{SEQUENCE_FILE_MAGIC, SEQUENCE_FILE_VERSION, count_, durationMs_};
@@ -53,18 +105,25 @@ bool SequenceStore::saveToFS() {
   f.write(reinterpret_cast<const uint8_t *>(points_), sizeof(SequencePoint) * count_);
   f.close();
 
+  strncpy(activeName_, safeName, sizeof(activeName_) - 1);
+  activeName_[sizeof(activeName_) - 1] = '\0';
   loaded_ = true;
   return true;
 }
 
-bool SequenceStore::loadFromFS() {
+bool SequenceStore::loadNamed(const char *name) {
   loaded_ = false;
   count_ = 0;
   durationMs_ = 0;
 
-  if (!LittleFS.exists(SEQUENCE_FILE_PATH)) return false;
+  char safeName[SEQ_NAME_MAX_LEN + 1];
+  if (!sanitizeName(name, safeName, sizeof(safeName))) return false;
 
-  File f = LittleFS.open(SEQUENCE_FILE_PATH, "r");
+  char path[40];
+  pathFor(safeName, path, sizeof(path));
+  if (!LittleFS.exists(path)) return false;
+
+  File f = LittleFS.open(path, "r");
   if (!f) return false;
 
   FileHeader header;
@@ -86,7 +145,57 @@ bool SequenceStore::loadFromFS() {
 
   count_ = header.pointCount;
   durationMs_ = header.durationMs;
+  strncpy(activeName_, safeName, sizeof(activeName_) - 1);
+  activeName_[sizeof(activeName_) - 1] = '\0';
   loaded_ = true;
+  return true;
+}
+
+uint8_t SequenceStore::listSequences(SequenceInfo *out, uint8_t maxCount) const {
+  uint8_t found = 0;
+  const uint8_t cap = maxCount < SEQ_MAX_LISTED ? maxCount : SEQ_MAX_LISTED;
+
+  File dir = LittleFS.open(SEQUENCE_DIR);
+  if (!dir || !dir.isDirectory()) return 0;
+
+  File f = dir.openNextFile();
+  while (f && found < cap) {
+    if (!f.isDirectory()) {
+      // f.name() is just the basename ("foo.bin") on this core; strip the extension.
+      String base = f.name();
+      int dot = base.lastIndexOf(".bin");
+      if (dot > 0) {
+        FileHeader header;
+        if (f.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) == sizeof(header) &&
+            header.magic == SEQUENCE_FILE_MAGIC && header.version == SEQUENCE_FILE_VERSION) {
+          String name = base.substring(0, dot);
+          strncpy(out[found].name, name.c_str(), sizeof(out[found].name) - 1);
+          out[found].name[sizeof(out[found].name) - 1] = '\0';
+          out[found].points = header.pointCount;
+          out[found].durationMs = header.durationMs;
+          found++;
+        }
+      }
+    }
+    f = dir.openNextFile();
+  }
+  return found;
+}
+
+bool SequenceStore::deleteSequence(const char *name) {
+  char safeName[SEQ_NAME_MAX_LEN + 1];
+  if (!sanitizeName(name, safeName, sizeof(safeName))) return false;
+
+  char path[40];
+  pathFor(safeName, path, sizeof(path));
+  if (!LittleFS.remove(path)) return false;
+
+  if (strcmp(safeName, activeName_) == 0) {
+    loaded_ = false;
+    count_ = 0;
+    durationMs_ = 0;
+    activeName_[0] = '\0';
+  }
   return true;
 }
 

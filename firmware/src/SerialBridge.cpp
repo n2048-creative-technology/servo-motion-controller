@@ -29,6 +29,10 @@ void SerialBridge::loopTick() {
 
 void SerialBridge::handleLine(const char *line) {
   if (line[0] == '\0') return;
+  if (network_ == nullptr) {
+    Serial.println("{\"ok\":false,\"error\":\"not_master\"}");
+    return;
+  }
 
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, line);
@@ -38,6 +42,36 @@ void SerialBridge::handleLine(const char *line) {
   }
 
   const char *cmd = doc["cmd"] | "";
+  if (strcmp(cmd, "remote_record_start") == 0) {
+    if (!doc["node"].is<int>()) {
+      Serial.println("{\"ok\":false,\"error\":\"expected node\"}");
+      return;
+    }
+    int node = doc["node"].as<int>();
+    if (node < 0 || node > NET_NODE_ID_MAX) {
+      Serial.println("{\"ok\":false,\"error\":\"node out of range\"}");
+      return;
+    }
+    bool ok = network_->sendSeqStart(static_cast<uint8_t>(node));
+    Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+    return;
+  }
+
+  if (strcmp(cmd, "remote_record_stop") == 0) {
+    if (!doc["node"].is<int>() || !doc["name"].is<const char *>()) {
+      Serial.println("{\"ok\":false,\"error\":\"expected node+name\"}");
+      return;
+    }
+    int node = doc["node"].as<int>();
+    if (node < 0 || node > NET_NODE_ID_MAX) {
+      Serial.println("{\"ok\":false,\"error\":\"node out of range\"}");
+      return;
+    }
+    bool ok = network_->sendSeqStop(static_cast<uint8_t>(node), doc["name"].as<const char *>());
+    Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+    return;
+  }
+
   if (strcmp(cmd, "list") == 0) {
     JsonDocument out;
     out["type"] = "nodes";
@@ -71,4 +105,16 @@ void SerialBridge::handleLine(const char *line) {
 
   bool ok = network_->sendCommand(static_cast<uint8_t>(node), angle);
   Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+}
+
+void SerialBridge::reportUploadResult(uint8_t nodeId, const char *name, bool ok, uint16_t points) {
+  JsonDocument out;
+  out["type"] = "upload_result";
+  out["node"] = nodeId;
+  out["name"] = name;
+  out["ok"] = ok;
+  out["points"] = points;
+  String outStr;
+  serializeJson(out, outStr);
+  Serial.println(outStr);
 }

@@ -88,12 +88,6 @@
       drawTrace();
     }
 
-    if (s.sequence) {
-      $("seqInfo").textContent = s.sequence.present
-        ? `${s.sequence.points} points, ${(s.sequence.duration_ms / 1000).toFixed(1)}s`
-        : "no sequence saved";
-    }
-
     // Keep the jog slider in sync when the servo is being driven by
     // something other than this browser (pattern/sequence/another client).
     if (document.activeElement !== $("jogSlider")) {
@@ -230,21 +224,84 @@
       apiPost("/api/record/start");
     });
     $("recStop").addEventListener("click", () => apiPost("/api/record/stop"));
-    $("recSave").addEventListener("click", () => apiPost("/api/record/save").then(refreshSequenceInfo));
+    $("recSave").addEventListener("click", () => {
+      const name = $("recName").value.trim();
+      if (!name) {
+        alert("Enter a name for this sequence first.");
+        return;
+      }
+      apiPost("/api/record/save", { name }).then((res) => {
+        if (res && res.ok) {
+          $("recName").value = "";
+          refreshSequenceList();
+        }
+      });
+    });
     $("recDiscard").addEventListener("click", () => {
       recTrace = [];
       drawTrace();
-      apiPost("/api/record/discard").then(refreshSequenceInfo);
+      apiPost("/api/record/discard");
     });
-    $("seqPlay").addEventListener("click", () => apiPost("/api/sequence/play"));
     $("seqStop").addEventListener("click", () => apiPost("/api/sequence/stop"));
   }
 
-  async function refreshSequenceInfo() {
-    const seq = await apiGet("/api/sequence");
-    $("seqInfo").textContent = seq.present
-      ? `${seq.points} points, ${(seq.duration_ms / 1000).toFixed(1)}s`
-      : "no sequence saved";
+  // ---------- sequences (Record tab list + Settings autostart picker) ----------
+  let sequenceCatalog = []; // [{name,points,duration_ms}]
+
+  async function refreshSequenceList() {
+    sequenceCatalog = await apiGet("/api/sequences").catch(() => []);
+
+    const body = $("seqBody");
+    if (body) {
+      body.innerHTML = sequenceCatalog.length
+        ? sequenceCatalog
+            .map(
+              (s) => `
+        <tr>
+          <td>${s.name}</td>
+          <td>${s.points}</td>
+          <td>${(s.duration_ms / 1000).toFixed(1)}s</td>
+          <td>
+            <button class="btn btn-go" data-play="${s.name}">Play</button>
+            <button class="btn btn-danger" data-delete="${s.name}">Delete</button>
+          </td>
+        </tr>`
+            )
+            .join("")
+        : '<tr><td colspan="4">no sequences saved</td></tr>';
+      body.querySelectorAll("[data-play]").forEach((btn) => {
+        btn.addEventListener("click", () => apiPost("/api/sequence/play", { name: btn.dataset.play }));
+      });
+      body.querySelectorAll("[data-delete]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          if (confirm(`Delete sequence "${btn.dataset.delete}"?`)) {
+            apiPost("/api/sequence/delete", { name: btn.dataset.delete }).then(refreshSequenceList);
+          }
+        });
+      });
+    }
+
+    populateSequenceSelect($("asSequenceName"));
+  }
+
+  function populateSequenceSelect(selectEl) {
+    if (!selectEl) return;
+    const current = selectEl.value;
+    selectEl.innerHTML = "";
+    if (sequenceCatalog.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(no sequences saved)";
+      selectEl.appendChild(opt);
+      return;
+    }
+    sequenceCatalog.forEach((s) => {
+      const opt = document.createElement("option");
+      opt.value = s.name;
+      opt.textContent = `${s.name} (${s.points} pts, ${(s.duration_ms / 1000).toFixed(1)}s)`;
+      selectEl.appendChild(opt);
+    });
+    if ([...selectEl.options].some((o) => o.value === current)) selectEl.value = current;
   }
 
   // ---------- settings tab ----------
@@ -273,6 +330,8 @@
         s.autostart.pattern
       );
     }
+    await refreshSequenceList();
+    $("asSequenceName").value = s.autostart.sequence_name || "";
     updateAsPatternVisibility();
 
     $("netMode").value = s.network.mode;
@@ -281,9 +340,11 @@
   }
 
   function updateAsPatternVisibility() {
-    const show = $("asTarget").value === "pattern";
-    $("asPatternTypeField").style.display = show ? "" : "none";
-    $("asPatternParams").style.display = show ? "" : "none";
+    const target = $("asTarget").value;
+    const showPattern = target === "pattern";
+    $("asPatternTypeField").style.display = showPattern ? "" : "none";
+    $("asPatternParams").style.display = showPattern ? "" : "none";
+    $("asSequenceField").style.display = target === "sequence" ? "" : "none";
   }
 
   // ---------- network (master/node) tab actions ----------
@@ -425,6 +486,7 @@
           enabled: $("asEnabled").checked,
           target: $("asTarget").value,
           pattern,
+          sequence_name: $("asSequenceName").value,
         },
       });
     });
@@ -437,7 +499,7 @@
 
     $("netMode").addEventListener("change", () => {
       updateNetVisibility();
-      refreshNodesTable();
+      refreshKnownNodes();
     });
 
     $("netSave").addEventListener("click", async () => {
@@ -461,7 +523,7 @@
     initTargetControls();
     connectWs();
     await loadPatterns();
-    await refreshSequenceInfo();
+    await refreshSequenceList();
     await initMasterUi();
   }
 
