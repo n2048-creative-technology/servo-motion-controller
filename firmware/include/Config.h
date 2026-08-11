@@ -62,6 +62,26 @@ static constexpr const char *AP_SSID_PREFIX = "ServoRig-";
 static constexpr const char *AP_DEFAULT_PASSWORD = "servo1234";
 static constexpr uint8_t AP_WIFI_CHANNEL = 1;
 
+// A Node drops its WiFi (AP + ESP-NOW, same radio) TX power while its servo
+// is actively being driven (PlaybackEngine::mode() != IDLE) and restores it
+// to full power once idle — WiFi TX draws its own current spike on top of
+// whatever the servo itself pulls, and shaving that off during exactly the
+// window a high-motion recording can already brown a Node out (see
+// docs/serial-protocol.md) trims the combined peak. A Master never carries
+// this cut — it drives no servo of its own, so there's no local current
+// spike to protect against, and it needs its own best possible range/
+// reliability for every Node's HELLO/CMD/SEQ_ACK traffic — so it's held at
+// WIFI_TX_POWER_MAX always (see main.cpp's setup()). Values are raw
+// wifi_power_t enum values from WiFiGeneric.h (kept as plain ints here so
+// Config.h doesn't need to pull in WiFi.h); cast at the WiFi.setTxPower()
+// call site. "Reduced" is WIFI_POWER_13dBm — ~20% of WIFI_POWER_19_5dBm's
+// max in actual linear RF power (dBm is logarithmic, so 20% of the *number*
+// would be a much bigger cut than 20% of the power itself), the closest
+// step this API offers to that. Lower TX power also means shorter
+// AP/ESP-NOW range while a Node is moving — expect that trade-off.
+static constexpr uint8_t WIFI_TX_POWER_MAX = 78;         // WIFI_POWER_19_5dBm (default/max)
+static constexpr uint8_t NODE_WIFI_TX_POWER_ACTIVE = 52; // WIFI_POWER_13dBm (~20% of max linear power)
+
 // ---- Web server ----
 static constexpr uint16_t HTTP_PORT = 80;
 static constexpr uint16_t DNS_PORT = 53;

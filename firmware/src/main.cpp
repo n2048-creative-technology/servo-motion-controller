@@ -26,6 +26,7 @@ static const IPAddress AP_IP(192, 168, 4, 1);
 static const IPAddress AP_NETMASK(255, 255, 255, 0);
 
 uint32_t lastTickMs = 0;
+bool nodeMotorActive = false; // NODE only — see NODE_WIFI_TX_POWER_* in Config.h
 
 // Role wiring (networkLink.begin/serialBridge.begin/sink selection below)
 // only happens once here in setup(), matching the documented "network.*
@@ -79,6 +80,10 @@ void setup() {
   // exactly as in v1. Autostart only makes sense with a real attached servo.
   IAngleSink *sink = &servo;
   if (settings.networkMode == OperatingMode::MASTER) {
+    // Always full power — see WIFI_TX_POWER_MAX's comment in Config.h. Set
+    // explicitly rather than just never lowering it, so this doesn't
+    // silently depend on the core's own boot-time default matching.
+    WiFi.setTxPower(static_cast<wifi_power_t>(WIFI_TX_POWER_MAX));
     networkAngleSink.begin(&networkLink);
     sink = &networkAngleSink;
     serialBridge.begin(&networkLink);
@@ -149,6 +154,15 @@ void loop() {
     lastTickMs = now;
     playback.tick(now);
     networkLink.reportLocalAngle(servo.getAngle());
+
+    if (bootNetworkMode == OperatingMode::NODE) {
+      const bool motorActive = playback.mode() != PlaybackMode::IDLE;
+      if (motorActive != nodeMotorActive) {
+        nodeMotorActive = motorActive;
+        WiFi.setTxPower(static_cast<wifi_power_t>(
+            motorActive ? NODE_WIFI_TX_POWER_ACTIVE : WIFI_TX_POWER_MAX));
+      }
+    }
   }
 
   networkLink.loopTick(now);

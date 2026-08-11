@@ -85,7 +85,14 @@
       "Bash(kill -9 3397289)",
       "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_final_feature_test.py)",
       "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_final_concurrent.py)",
-      "Bash(SCRATCH=\"/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad\" *)"
+      "Bash(SCRATCH=\"/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad\" *)",
+      "Bash(grep -n \"WIFI_POWER_\" -A2 /home/mauricio/.platformio/packages/framework-arduinoespressif32-libs/esp32c3/include/esp_wifi/include/esp_wifi_types.h | head -40)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32-libs/esp32c3/include/esp_wifi/include/**)",
+      "Bash(grep -rn \"WIFI_POWER_\" ~/.platformio/packages/framework-arduinoespressif32-libs/esp32c3/include/ 2>/dev/null | head -20 *)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32-libs/esp32c3/include/**)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/libraries/WiFi/src/**)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_wifi_power_test.py)",
+      "Bash(rm -f \"/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad\"/drive_*.py)"
     ],
     "additionalDirectories": [
       "/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad"
