@@ -37,8 +37,9 @@ struct NetPacket {
   uint32_t sessionId = 0;  // CMD only: randomized per Master boot
   uint32_t seq = 0;        // CMD only: monotonically increasing per session
   char seqName[24] = {0};  // SEQ_STOP/SEQ_ACK only: sequence name, sanitized+truncated
-  uint8_t status = 0;      // SEQ_ACK only: 0 = saved OK, nonzero = failed
+  uint8_t status = 0;      // SEQ_ACK only: 0 = saved OK, nonzero = a SeqAckStatus reason code
   uint16_t pointCount = 0; // SEQ_ACK only: points captured/saved
+  uint32_t freeBytes = 0;  // SPACE_REPLY only: bytes free in the Node's LittleFS
 };
 
 static constexpr uint8_t NET_PACKET_TYPE_CMD = 1;
@@ -46,6 +47,29 @@ static constexpr uint8_t NET_PACKET_TYPE_HELLO = 2;
 static constexpr uint8_t NET_PACKET_TYPE_SEQ_START = 3;
 static constexpr uint8_t NET_PACKET_TYPE_SEQ_STOP = 4;
 static constexpr uint8_t NET_PACKET_TYPE_SEQ_ACK = 5;
+// Master -> a specific Node (or broadcast): delete every saved sequence on
+// it, same effect as that Node's own /api/sequences/clear. Fire-and-forget
+// like SEQ_START — no ack, since it's a one-shot housekeeping step (e.g.
+// "clear before uploading") rather than data that needs a delivery
+// guarantee; the PC tool just gives it a moment to land before proceeding.
+static constexpr uint8_t NET_PACKET_TYPE_SEQ_CLEAR = 6;
+// Master -> a specific Node: "how much LittleFS space do you have free?" —
+// used as an upload preflight check. SPACE_REPLY: Node -> Master, carries
+// freeBytes.
+static constexpr uint8_t NET_PACKET_TYPE_SPACE_QUERY = 7;
+static constexpr uint8_t NET_PACKET_TYPE_SPACE_REPLY = 8;
+
+// SEQ_ACK's status byte when saving failed, distinguishing *why* — surfaced
+// to the PC as human-readable text (see SerialBridge::reportUploadResult)
+// instead of a bare "ok:false" that gives no hint whether to just retry or
+// look at something else (weak signal vs. a Node that reset mid-upload vs.
+// its flash genuinely being full).
+enum class SeqAckStatus : uint8_t {
+  Ok = 0,
+  NoPointsCaptured = 1, // recording never started (SEQ_START lost, or the Node reset mid-transfer)
+  InvalidName = 2,      // name sanitized to nothing
+  WriteFailed = 3,      // LittleFS open/write failed (e.g. out of space)
+};
 
 struct KnownNode {
   uint8_t id = 0;
@@ -89,21 +113,35 @@ public:
   // NODE only: invoked when a CMD addressed to us (or to "all") arrives.
   void onNodeCommand(std::function<void(float angleDeg)> callback) { nodeCommandCb_ = callback; }
 
-  // NODE only: invoked when a SEQ_START/SEQ_STOP addressed to us arrives.
+  // NODE only: invoked when a SEQ_START/SEQ_STOP/SEQ_CLEAR/SPACE_QUERY addressed to us arrives.
   void onSeqStart(std::function<void()> callback) { seqStartCb_ = callback; }
   void onSeqStop(std::function<void(const char *name)> callback) { seqStopCb_ = callback; }
+  void onSeqClear(std::function<void()> callback) { seqClearCb_ = callback; }
+  void onSpaceQuery(std::function<void()> callback) { spaceQueryCb_ = callback; }
 
-  // MASTER only: invoked when a SEQ_ACK arrives (fromNodeId, name, ok, pointCount).
-  void onSeqAck(std::function<void(uint8_t, const char *, bool, uint16_t)> callback) {
+  // MASTER only: invoked when a SEQ_ACK arrives (fromNodeId, name, status, pointCount).
+  void onSeqAck(std::function<void(uint8_t, const char *, SeqAckStatus, uint16_t)> callback) {
     seqAckCb_ = callback;
   }
+
+  // MASTER only: invoked when a SPACE_REPLY arrives (fromNodeId, freeBytes).
+  void onSpaceReply(std::function<void(uint8_t, uint32_t)> callback) { spaceReplyCb_ = callback; }
 
   // MASTER only: remotely start/stop-and-save a recording on targetNode.
   bool sendSeqStart(uint8_t targetNode);
   bool sendSeqStop(uint8_t targetNode, const char *name);
 
+  // MASTER only: remotely delete every saved sequence on targetNode.
+  bool sendSeqClear(uint8_t targetNode);
+
+  // MASTER only: ask targetNode how much LittleFS space it has free.
+  bool sendSpaceQuery(uint8_t targetNode);
+
   // NODE only: reports the outcome of a SEQ_STOP back to the Master.
-  bool sendSeqAck(const char *name, bool ok, uint16_t pointCount);
+  bool sendSeqAck(const char *name, SeqAckStatus status, uint16_t pointCount);
+
+  // NODE only: reports free LittleFS space back to the Master.
+  bool sendSpaceReply(uint32_t freeBytes);
 
   // MASTER only: read-only view of the known-node table for WebApi/SerialBridge.
   const KnownNode *knownNodes() const { return knownNodes_; }
@@ -129,7 +167,10 @@ private:
   std::function<void(float angleDeg)> nodeCommandCb_;
   std::function<void()> seqStartCb_;
   std::function<void(const char *name)> seqStopCb_;
-  std::function<void(uint8_t, const char *, bool, uint16_t)> seqAckCb_;
+  std::function<void()> seqClearCb_;
+  std::function<void()> spaceQueryCb_;
+  std::function<void(uint8_t, const char *, SeqAckStatus, uint16_t)> seqAckCb_;
+  std::function<void(uint8_t, uint32_t)> spaceReplyCb_;
   KnownNode knownNodes_[NET_MAX_TRACKED_NODES];
   LastCommand lastCommands_[NET_MAX_LAST_COMMANDS];
 
@@ -140,13 +181,30 @@ private:
   // with nothing serializing the two: the two lines' bytes can interleave
   // into corrupted JSON the PC side can't parse (observed in practice — an
   // upload's own success confirmation coming back garbled and unparsed).
-  // Stashing the ack here and firing seqAckCb_ from loopTick() instead
-  // keeps every Serial write on loop()'s task.
-  bool pendingSeqAck_ = false;
-  uint8_t pendingAckNodeId_ = 0;
-  char pendingAckName_[24] = {0};
-  bool pendingAckOk_ = false;
-  uint16_t pendingAckPoints_ = 0;
+  // Stashing acks here and firing seqAckCb_ from loopTick() instead keeps
+  // every Serial write on loop()'s task. This is a small FIFO, not a single
+  // slot, because "upload to all Nodes" now runs several Nodes' uploads
+  // concurrently — a single slot let a second Node's SEQ_ACK silently
+  // clobber a first, still-undrained one, losing its confirmation entirely
+  // (observed in practice: concurrent multi-Node uploads reproducibly
+  // losing every ack even though every Node actually saved successfully).
+  struct PendingAck {
+    uint8_t nodeId = 0;
+    char name[24] = {0};
+    SeqAckStatus status = SeqAckStatus::Ok;
+    uint16_t points = 0;
+  };
+  PendingAck pendingAcks_[NET_MAX_PENDING_ACKS];
+  uint8_t pendingAckCount_ = 0;
+
+  // Same FIFO reasoning as pendingAcks_ above — several Nodes' SPACE_REPLYs
+  // can land close together during a multi-Node upload's preflight check.
+  struct PendingSpaceReply {
+    uint8_t nodeId = 0;
+    uint32_t freeBytes = 0;
+  };
+  PendingSpaceReply pendingSpaceReplies_[NET_MAX_PENDING_ACKS];
+  uint8_t pendingSpaceReplyCount_ = 0;
 
   // Same reasoning as pendingSeqAck_ above, but for the Node side: onSeqStop
   // triggers SequenceStore::saveAs(), a full LittleFS file write that can
@@ -161,6 +219,8 @@ private:
   bool pendingSeqStart_ = false;
   bool pendingSeqStop_ = false;
   char pendingStopName_[24] = {0};
+  bool pendingSeqClear_ = false;
+  bool pendingSpaceQuery_ = false;
 
   void recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now);
   void recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t now);

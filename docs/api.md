@@ -21,6 +21,7 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 | POST | `/api/sequence/play` | `{name}` | loads and plays that sequence on loop; mode → `sequence` |
 | POST | `/api/sequence/stop` | — | mode → `manual` |
 | POST | `/api/sequence/delete` | `{name}` | removes that sequence file; clears it as "active" first if it was playing |
+| POST | `/api/sequences/clear` | — | removes every saved sequence on this board; `{ok:true, removed:N}` |
 | GET | `/api/settings` | — | `{ap:{ssid,has_password}, servo:{min_us,max_us,min_angle,max_angle,center_angle,invert}, autostart:{enabled,target,pattern,sequence_name}, network:{mode,node_id}}` — password is never echoed back |
 | POST | `/api/settings` | any subset of the GET shape (`ap.password` only if changing it) | persists to NVS; servo calibration changes take effect immediately, `network.*` changes need a reboot (see `/api/reboot`) |
 | POST | `/api/settings/reset` | — | restores factory defaults (only recovery path if AP credentials are forgotten) |

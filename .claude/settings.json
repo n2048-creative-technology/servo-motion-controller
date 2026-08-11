@@ -62,7 +62,33 @@
       "Bash(fuser /dev/ttyACM0)",
       "Bash(for i in 1 2 3 4 5 6; do *)",
       "Bash(python3 -c ' *)",
-      "Bash(udevadm settle *)"
+      "Bash(udevadm settle *)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_batch_test.py)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_concurrent_test.py)",
+      "Bash(sleep 3; ls /dev/ttyACM* 2>&1)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_real_upload_test.py)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_real_upload_detail.py)",
+      "Bash(pkill -f \"master_live_capture\")",
+      "Bash(kill 3346714)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_crash_hunt.py)",
+      "Bash(sleep 10 *)",
+      "Bash(sleep 3 *)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_final_validation.py)",
+      "Bash(pkill -f \"drive_final_validation\")",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_single_sanity.py)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_gentle_test.py)",
+      "Bash(git stash *)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_baseline_test.py)",
+      "Bash(pkill -f \"drive_baseline_test\")",
+      "Bash(sed -i 's/app\\\\._upload is None/not app._uploads/' __TRACKED_VAR__/drive_baseline_test.py)",
+      "Bash(grep 'not app._uploads\\\\|_begin_upload' __TRACKED_VAR__/drive_baseline_test.py)",
+      "Bash(kill -9 3397289)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_final_feature_test.py)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_final_concurrent.py)",
+      "Bash(SCRATCH=\"/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad\" *)"
+    ],
+    "additionalDirectories": [
+      "/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad"
     ]
   }
 }

@@ -89,16 +89,16 @@ void SequenceStore::discardRecording() {
   recording_ = false;
 }
 
-bool SequenceStore::saveAs(const char *name) {
-  if (count_ == 0) return false;
+SaveResult SequenceStore::saveAs(const char *name) {
+  if (count_ == 0) return SaveResult::NoPoints;
   char safeName[SEQ_NAME_MAX_LEN + 1];
-  if (!sanitizeName(name, safeName, sizeof(safeName))) return false;
+  if (!sanitizeName(name, safeName, sizeof(safeName))) return SaveResult::InvalidName;
 
   char path[40];
   pathFor(safeName, path, sizeof(path));
 
   File f = LittleFS.open(path, "w");
-  if (!f) return false;
+  if (!f) return SaveResult::WriteFailed;
 
   FileHeader header{SEQUENCE_FILE_MAGIC, SEQUENCE_FILE_VERSION, count_, durationMs_};
   f.write(reinterpret_cast<const uint8_t *>(&header), sizeof(header));
@@ -108,7 +108,11 @@ bool SequenceStore::saveAs(const char *name) {
   strncpy(activeName_, safeName, sizeof(activeName_) - 1);
   activeName_[sizeof(activeName_) - 1] = '\0';
   loaded_ = true;
-  return true;
+  return SaveResult::Ok;
+}
+
+uint32_t SequenceStore::freeSpaceBytes() {
+  return LittleFS.totalBytes() - LittleFS.usedBytes();
 }
 
 bool SequenceStore::loadNamed(const char *name) {
@@ -197,6 +201,41 @@ bool SequenceStore::deleteSequence(const char *name) {
     activeName_[0] = '\0';
   }
   return true;
+}
+
+uint8_t SequenceStore::clearAll() {
+  uint8_t removed = 0;
+  // One directory pass per delete (rather than deleting while iterating an
+  // open directory handle, which isn't well-defined on this LittleFS
+  // wrapper) — fine given a board only ever holds a handful of sequences.
+  for (;;) {
+    char name[SEQ_NAME_MAX_LEN + 1] = {0};
+    bool found = false;
+
+    File dir = LittleFS.open(SEQUENCE_DIR);
+    if (!dir || !dir.isDirectory()) break;
+    File f = dir.openNextFile();
+    while (f) {
+      if (!f.isDirectory()) {
+        String base = f.name();
+        int dot = base.lastIndexOf(".bin");
+        if (dot > 0) {
+          String n = base.substring(0, dot);
+          strncpy(name, n.c_str(), sizeof(name) - 1);
+          name[sizeof(name) - 1] = '\0';
+          found = true;
+          break;
+        }
+      }
+      f = dir.openNextFile();
+    }
+    dir.close();
+
+    if (!found) break;
+    if (!deleteSequence(name)) break; // avoid looping forever on a delete that keeps failing
+    removed++;
+  }
+  return removed;
 }
 
 float SequenceStore::angleAtTime(uint32_t t_ms) const {

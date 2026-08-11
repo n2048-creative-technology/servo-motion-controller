@@ -249,7 +249,7 @@ void WebApi::setupRoutes() {
           request->send(400, "application/json", "{\"ok\":false,\"error\":\"expected name\"}");
           return;
         }
-        bool ok = sequence_->saveAs(json["name"].as<const char *>());
+        bool ok = sequence_->saveAs(json["name"].as<const char *>()) == SaveResult::Ok;
         request->send(ok ? 200 : 400, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false}");
       }));
 
@@ -300,6 +300,12 @@ void WebApi::setupRoutes() {
         }
         request->send(200, "application/json", "{\"ok\":true}");
       }));
+
+  server_.on("/api/sequences/clear", HTTP_POST, [this](AsyncWebServerRequest *request) {
+    uint8_t removed = sequence_->clearAll();
+    String out = "{\"ok\":true,\"removed\":" + String(removed) + "}";
+    request->send(200, "application/json", out);
+  });
 
   server_.on("/api/settings", HTTP_GET, [this](AsyncWebServerRequest *request) {
     const PersistedSettings &s = settingsStore_->settings();

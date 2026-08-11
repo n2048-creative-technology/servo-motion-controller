@@ -82,8 +82,11 @@ void setup() {
     networkAngleSink.begin(&networkLink);
     sink = &networkAngleSink;
     serialBridge.begin(&networkLink);
-    networkLink.onSeqAck([](uint8_t nodeId, const char *name, bool ok, uint16_t points) {
-      serialBridge.reportUploadResult(nodeId, name, ok, points);
+    networkLink.onSeqAck([](uint8_t nodeId, const char *name, SeqAckStatus status, uint16_t points) {
+      serialBridge.reportUploadResult(nodeId, name, status, points);
+    });
+    networkLink.onSpaceReply([](uint8_t nodeId, uint32_t freeBytes) {
+      serialBridge.reportSpaceReply(nodeId, freeBytes);
     });
   } else if (settings.networkMode == OperatingMode::NODE) {
     networkLink.onNodeCommand([](float angleDeg) { playback.onNetworkCommand(angleDeg, millis()); });
@@ -110,9 +113,14 @@ void setup() {
     networkLink.onSeqStop([](const char *name) {
       playback.stopRecording();
       sequenceStore.stopRecording();
-      bool ok = sequenceStore.saveAs(name);
-      networkLink.sendSeqAck(name, ok, sequenceStore.recordedPointCount());
+      // SaveResult and SeqAckStatus share the same numeric reason codes by
+      // design (SequenceStore stays free of any NetworkLink/protocol
+      // dependency) — see both enums' definitions.
+      SaveResult result = sequenceStore.saveAs(name);
+      networkLink.sendSeqAck(name, static_cast<SeqAckStatus>(result), sequenceStore.recordedPointCount());
     });
+    networkLink.onSeqClear([]() { sequenceStore.clearAll(); });
+    networkLink.onSpaceQuery([]() { networkLink.sendSpaceReply(SequenceStore::freeSpaceBytes()); });
   }
   playback.begin(sink, &sequenceStore);
 

@@ -243,6 +243,12 @@
       apiPost("/api/record/discard");
     });
     $("seqStop").addEventListener("click", () => apiPost("/api/sequence/stop"));
+    $("seqClearAll").addEventListener("click", () => {
+      if (!sequenceCatalog.length) return;
+      if (confirm(`Delete all ${sequenceCatalog.length} saved sequence(s) on this board? This can't be undone.`)) {
+        apiPost("/api/sequences/clear").then(refreshSequenceList);
+      }
+    });
   }
 
   // ---------- sequences (Record tab list + Settings autostart picker) ----------

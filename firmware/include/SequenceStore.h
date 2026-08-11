@@ -9,6 +9,16 @@ struct SequencePoint {
   int16_t angle_decideg; // angle * 10
 };
 
+// Why saveAs() failed, if it did — surfaced over ESP-NOW as SeqAckStatus
+// (see NetworkLink.h) and to the local web UI, so a failure reads as
+// something actionable instead of a bare false.
+enum class SaveResult : uint8_t {
+  Ok = 0,
+  NoPoints = 1,     // nothing was ever captured (recording never started, or was empty)
+  InvalidName = 2,  // name sanitized to nothing
+  WriteFailed = 3,  // LittleFS open/write failed (e.g. out of space)
+};
+
 // One sequence's metadata, as returned by listSequences() — cheap to produce
 // since it's read from just each file's header, not its full point array.
 struct SequenceInfo {
@@ -41,8 +51,11 @@ public:
   uint16_t recordedPointCount() const { return count_; }
 
   // Writes the current buffer (just recorded, or previously loaded) as
-  // "<name>.bin". Returns false on an invalid name or write failure.
-  bool saveAs(const char *name);
+  // "<name>.bin".
+  SaveResult saveAs(const char *name);
+
+  // Also usable for a free-space preflight check before recording/uploading.
+  static uint32_t freeSpaceBytes();
   void discardRecording();
 
   // Loads a named sequence from FS into the active buffer (for playback).
@@ -59,6 +72,11 @@ public:
   // found (capped at maxCount, and at SEQ_MAX_LISTED regardless).
   uint8_t listSequences(SequenceInfo *out, uint8_t maxCount) const;
   bool deleteSequence(const char *name);
+
+  // Removes every saved sequence file on this board. Returns how many were
+  // deleted. Also clears the active in-RAM buffer if it pointed at one of
+  // them (matching deleteSequence's behavior for the active sequence).
+  uint8_t clearAll();
 
   // Restricts to [A-Za-z0-9_-], truncates to SEQ_NAME_MAX_LEN chars. Returns
   // false (leaving `out` untouched) if nothing valid remains.

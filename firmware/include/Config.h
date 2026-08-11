@@ -71,7 +71,7 @@ static constexpr const char *FIRMWARE_VERSION = "2.0.0";
 
 // ---- Master/Node network (ESP-NOW) ----
 static constexpr uint8_t NET_PACKET_MAGIC = 0xE5;
-static constexpr uint8_t NET_PACKET_VERSION = 3; // v3: added SEQ_START/SEQ_STOP/SEQ_ACK (remote sequence upload)
+static constexpr uint8_t NET_PACKET_VERSION = 4; // v4: added SEQ_CLEAR, SPACE_QUERY/SPACE_REPLY (free-space preflight)
 static constexpr uint8_t NET_BROADCAST_NODE = 0; // targetNode value meaning "all nodes"
 static constexpr uint8_t NET_NODE_ID_MIN = 1;
 static constexpr uint8_t NET_NODE_ID_MAX = 250;
@@ -86,6 +86,14 @@ static constexpr uint8_t NET_MAX_TRACKED_NODES = 32;     // master's known-node 
 // trigger a fresh send.
 static constexpr uint32_t NET_CMD_RESEND_INTERVAL_MS = 300;
 static constexpr uint8_t NET_MAX_LAST_COMMANDS = 16; // distinct targets (node ids or broadcast) tracked for resend
+
+// Master: how many SEQ_ACKs can be queued between one loopTick() and the
+// next before an overflowing one is dropped. Needs to be more than 1 now
+// that "upload to all Nodes" runs several Nodes' uploads concurrently —
+// their SEQ_ACKs can arrive close enough together that a single pending
+// slot would let a later one silently overwrite an earlier, still-unread
+// one (see NetworkLink.h's pendingAcks_ comment).
+static constexpr uint8_t NET_MAX_PENDING_ACKS = 8;
 
 // Node: periodically re-applies the last commanded angle to the servo, so a
 // missed update is corrected as soon as ESP-NOW recovers rather than the

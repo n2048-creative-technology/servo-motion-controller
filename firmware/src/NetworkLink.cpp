@@ -69,9 +69,18 @@ void NetworkLink::loopTick(uint32_t now) {
     resendDueCommands(now);
   }
 
-  if (pendingSeqAck_) {
-    pendingSeqAck_ = false;
-    if (seqAckCb_) seqAckCb_(pendingAckNodeId_, pendingAckName_, pendingAckOk_, pendingAckPoints_);
+  while (pendingAckCount_ > 0) {
+    PendingAck ack = pendingAcks_[0];
+    for (uint8_t i = 1; i < pendingAckCount_; i++) pendingAcks_[i - 1] = pendingAcks_[i];
+    pendingAckCount_--;
+    if (seqAckCb_) seqAckCb_(ack.nodeId, ack.name, ack.status, ack.points);
+  }
+
+  while (pendingSpaceReplyCount_ > 0) {
+    PendingSpaceReply reply = pendingSpaceReplies_[0];
+    for (uint8_t i = 1; i < pendingSpaceReplyCount_; i++) pendingSpaceReplies_[i - 1] = pendingSpaceReplies_[i];
+    pendingSpaceReplyCount_--;
+    if (spaceReplyCb_) spaceReplyCb_(reply.nodeId, reply.freeBytes);
   }
 
   if (pendingSeqStart_) {
@@ -81,6 +90,14 @@ void NetworkLink::loopTick(uint32_t now) {
   if (pendingSeqStop_) {
     pendingSeqStop_ = false;
     if (seqStopCb_) seqStopCb_(pendingStopName_);
+  }
+  if (pendingSeqClear_) {
+    pendingSeqClear_ = false;
+    if (seqClearCb_) seqClearCb_();
+  }
+  if (pendingSpaceQuery_) {
+    pendingSpaceQuery_ = false;
+    if (spaceQueryCb_) spaceQueryCb_();
   }
 }
 
@@ -138,14 +155,39 @@ bool NetworkLink::sendSeqStop(uint8_t targetNode, const char *name) {
   return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
 }
 
-bool NetworkLink::sendSeqAck(const char *name, bool ok, uint16_t pointCount) {
+bool NetworkLink::sendSeqClear(uint8_t targetNode) {
+  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
+  NetPacket pkt;
+  pkt.type = NET_PACKET_TYPE_SEQ_CLEAR;
+  pkt.targetNode = targetNode;
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::sendSeqAck(const char *name, SeqAckStatus status, uint16_t pointCount) {
   if (!espNowReady_ || mode_ != OperatingMode::NODE) return false;
   NetPacket pkt;
   pkt.type = NET_PACKET_TYPE_SEQ_ACK;
   pkt.nodeId = nodeId_;
   strncpy(pkt.seqName, name, sizeof(pkt.seqName) - 1);
-  pkt.status = ok ? 0 : 1;
+  pkt.status = static_cast<uint8_t>(status);
   pkt.pointCount = pointCount;
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::sendSpaceQuery(uint8_t targetNode) {
+  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
+  NetPacket pkt;
+  pkt.type = NET_PACKET_TYPE_SPACE_QUERY;
+  pkt.targetNode = targetNode;
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::sendSpaceReply(uint32_t freeBytes) {
+  if (!espNowReady_ || mode_ != OperatingMode::NODE) return false;
+  NetPacket pkt;
+  pkt.type = NET_PACKET_TYPE_SPACE_REPLY;
+  pkt.nodeId = nodeId_;
+  pkt.freeBytes = freeBytes;
   return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
 }
 
@@ -226,15 +268,32 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     strncpy(pendingStopName_, pkt.seqName, sizeof(pendingStopName_) - 1);
     pendingStopName_[sizeof(pendingStopName_) - 1] = '\0';
     pendingSeqStop_ = true;
+  } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_CLEAR) {
+    if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
+    pendingSeqClear_ = true;
+  } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SPACE_QUERY) {
+    if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
+    pendingSpaceQuery_ = true;
   } else if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_SEQ_ACK) {
     pkt.seqName[sizeof(pkt.seqName) - 1] = '\0';
-    // Deferred to loopTick() rather than calling seqAckCb_ here directly —
-    // see the pendingSeqAck_ fields' comment in NetworkLink.h.
-    pendingAckNodeId_ = pkt.nodeId;
-    strncpy(pendingAckName_, pkt.seqName, sizeof(pendingAckName_) - 1);
-    pendingAckName_[sizeof(pendingAckName_) - 1] = '\0';
-    pendingAckOk_ = pkt.status == 0;
-    pendingAckPoints_ = pkt.pointCount;
-    pendingSeqAck_ = true;
+    // Queued for loopTick() rather than calling seqAckCb_ here directly —
+    // see the pendingAcks_ fields' comment in NetworkLink.h.
+    if (pendingAckCount_ < NET_MAX_PENDING_ACKS) {
+      PendingAck &slot = pendingAcks_[pendingAckCount_++];
+      slot.nodeId = pkt.nodeId;
+      strncpy(slot.name, pkt.seqName, sizeof(slot.name) - 1);
+      slot.name[sizeof(slot.name) - 1] = '\0';
+      slot.status = static_cast<SeqAckStatus>(pkt.status);
+      slot.points = pkt.pointCount;
+    }
+    // else: more acks arrived than loop() has drained — drop the overflow
+    // rather than corrupt an existing slot; the PC side already retries a
+    // SEQ_STOP it never got confirmation for.
+  } else if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_SPACE_REPLY) {
+    if (pendingSpaceReplyCount_ < NET_MAX_PENDING_ACKS) {
+      PendingSpaceReply &slot = pendingSpaceReplies_[pendingSpaceReplyCount_++];
+      slot.nodeId = pkt.nodeId;
+      slot.freeBytes = pkt.freeBytes;
+    }
   }
 }

@@ -67,6 +67,50 @@ UPLOAD_ACK_TIMEOUT_MS = 4000  # how long to wait for a SEQ_ACK before retrying t
 UPLOAD_START_RESENDS = 5
 UPLOAD_START_RESEND_INTERVAL_MS = 100
 
+# "Clear before uploading" fires remote_clear and waits this long before
+# starting the actual remote_record_start — SEQ_CLEAR has no ack (see
+# firmware NetworkLink.h), so this is just giving it a moment to land and
+# the Node's own directory-scan-and-delete loop a moment to finish before
+# the upload's own control packets start competing for the same link.
+UPLOAD_CLEAR_SETTLE_MS = 300
+
+# When uploading to several Nodes at once, each Node's own upload still runs
+# concurrently end to end (their point streams fully overlap — that's the
+# whole point), but kicking every Node's remote_record_start off in the very
+# same instant means their remote_record_stop requests (and the SEQ_ACKs
+# racing back from N different Nodes) also land in the same few
+# milliseconds, since real "upload to all Nodes" sources are almost always
+# same-duration multi-Node recordings. Verified against real hardware: doing
+# that produced a reproducible 0/4 success rate (every ack lost) across
+# repeated runs, versus reliable success staggered like this by even a
+# small, mostly-imperceptible offset per Node.
+UPLOAD_BATCH_STAGGER_MS = 150
+
+# Must match firmware's SequenceStore.cpp FileHeader (12 bytes) and
+# SequencePoint (8 bytes: uint32_t t_ms + int16_t angle_decideg, padded) —
+# used to estimate a recording's on-Node file size for the free-space
+# preflight check below. RECORD_INTERVAL_MS must match Config.h: a Node
+# captures at that cadence regardless of how densely we stream points to it,
+# so the estimate is based on wall-clock duration, not our own point count.
+SEQ_FILE_HEADER_BYTES = 12
+SEQ_POINT_BYTES = 8
+NODE_RECORD_INTERVAL_MS = 50
+
+# How long to wait for a space_reply before giving up and uploading anyway
+# (best-effort, like every other ESP-NOW round trip in this tool — a Node
+# that doesn't answer isn't necessarily out of space, it might just be a
+# dropped packet, so this doesn't block the upload, only informs it).
+SPACE_QUERY_TIMEOUT_MS = 800
+
+
+def estimate_sequence_file_bytes(duration_ms):
+    """How many bytes a recording of this wall-clock duration will occupy on
+    a Node's flash once captured at its own fixed cadence — see
+    NODE_RECORD_INTERVAL_MS."""
+    points = int(duration_ms / NODE_RECORD_INTERVAL_MS) + 1
+    return SEQ_FILE_HEADER_BYTES + points * SEQ_POINT_BYTES
+
+
 # Must match firmware's Config.h SEQ_NAME_MAX_LEN and SequenceStore::sanitizeName.
 SEQ_NAME_MAX_LEN = 23
 _SEQ_NAME_ALLOWED_CHARS = frozenset(
@@ -434,11 +478,11 @@ class LearnDialog(tk.Toplevel):
 
 
 class UploadDialog(tk.Toplevel):
-    """Picks a source (loaded CSV or the last live recording), a single Node
-    ID present in it, and a name — then hands that off to the caller, which
-    does the actual streaming. Only that Node's own column is ever sent (see
-    App._begin_upload), matching the "each Node only gets its own data"
-    requirement."""
+    """Picks a source (loaded CSV or the last live recording), a Node ID (or
+    every Node present in the source) and a name — then hands that off to
+    the caller, which does the actual streaming. Only each target Node's own
+    column is ever sent to it (see App._begin_upload), matching the "each
+    Node only gets its own data" requirement."""
 
     def __init__(self, parent, csv_rows, record_rows, on_confirm):
         super().__init__(parent)
@@ -467,17 +511,28 @@ class UploadDialog(tk.Toplevel):
         self.node_combo = ttk.Combobox(form, textvariable=self.node_var, state="readonly", width=28)
         self.node_combo.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
 
-        ttk.Label(form, text="Sequence name:").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.all_nodes_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            form, text="Upload to all Nodes present in source", variable=self.all_nodes_var,
+            command=self._refresh_node_choices,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        self.clear_first_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            form, text="Clear Node's saved recordings before uploading", variable=self.clear_first_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        ttk.Label(form, text="Sequence name:").grid(row=4, column=0, sticky="w", pady=(6, 0))
         self.name_var = tk.StringVar()
-        ttk.Entry(form, textvariable=self.name_var, width=30).grid(row=2, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
+        ttk.Entry(form, textvariable=self.name_var, width=30).grid(row=4, column=1, sticky="w", padx=(4, 0), pady=(6, 0))
 
         self.hint_var = tk.StringVar(value="")
         ttk.Label(form, textvariable=self.hint_var, foreground="#666", wraplength=320).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(6, 0)
+            row=5, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
 
         btns = ttk.Frame(form)
-        btns.grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="Start Upload", command=self._confirm).pack(side="left")
 
@@ -498,14 +553,22 @@ class UploadDialog(tk.Toplevel):
         rows = self._current_rows()
         node_ids = sorted({nid for _, sample in rows for nid in sample})
         self.node_combo["values"] = [str(n) for n in node_ids]
-        if node_ids:
+        if node_ids and not self.node_var.get():
             self.node_var.set(str(node_ids[0]))
+        self.node_combo.configure(state="disabled" if self.all_nodes_var.get() else "readonly")
+
         duration_s = (rows[-1][0] / 1000.0) if rows else 0.0
         over = duration_s * 1000 > UPLOAD_MAX_DURATION_MS
+        if self.all_nodes_var.get():
+            target_desc = (
+                f" Will upload to all {len(node_ids)} Node(s) in the source at once, "
+                f"each getting only its own column." if node_ids else ""
+            )
+        else:
+            target_desc = " Only the selected Node's own column is sent — the others are never transmitted to it." if node_ids else ""
         self.hint_var.set(
             f"{duration_s:.1f}s of motion."
-            + (f" Only the selected Node's own column is sent — the others are never transmitted to it."
-               if node_ids else "")
+            + target_desc
             + (f" Longer than the {UPLOAD_MAX_DURATION_MS/1000:.0f}s a Node can hold; it'll be truncated."
                if over else "")
         )
@@ -515,11 +578,19 @@ class UploadDialog(tk.Toplevel):
         if not rows:
             messagebox.showerror("No source", "Pick a source with data first.", parent=self)
             return
-        try:
-            node_id = int(self.node_var.get())
-        except (ValueError, TypeError):
-            messagebox.showerror("No Node", "Pick a Node ID first.", parent=self)
-            return
+
+        if self.all_nodes_var.get():
+            node_ids = sorted({nid for _, sample in rows for nid in sample})
+            if not node_ids:
+                messagebox.showerror("No Nodes", "No Node data found in the selected source.", parent=self)
+                return
+        else:
+            try:
+                node_ids = [int(self.node_var.get())]
+            except (ValueError, TypeError):
+                messagebox.showerror("No Node", "Pick a Node ID first.", parent=self)
+                return
+
         name = sanitize_sequence_name(self.name_var.get().strip())
         if not name:
             messagebox.showerror(
@@ -528,7 +599,7 @@ class UploadDialog(tk.Toplevel):
                 parent=self,
             )
             return
-        self.on_confirm(rows, node_id, name)
+        self.on_confirm(rows, node_ids, name, self.clear_first_var.get())
         self.destroy()
 
 
@@ -559,8 +630,9 @@ class App:
         self.playback_index = 0
         self._playback_job = None
 
-        self._upload = None  # in-progress upload state dict, or None — see _begin_upload
-        self._upload_job = None
+        self._uploads = {}  # node_id -> in-progress upload state dict, concurrently — see _begin_upload
+        self._upload_batch = None  # {"total","done","ok","failed"} while a multi-Node upload run is active
+        self.space_replies = {}  # node_id -> last-seen free_bytes, from space_reply messages
 
         self._build_widgets()
         self._refresh_ports()
@@ -615,6 +687,7 @@ class App:
         self.learn_btn = ttk.Button(map_btns, text="Learn New Mapping", command=self._start_learn)
         self.learn_btn.pack(fill="x")
         ttk.Button(map_btns, text="Remove Selected", command=self._remove_selected_mapping).pack(fill="x", pady=(4, 0))
+        ttk.Button(map_btns, text="Remove All", command=self._remove_all_mappings).pack(fill="x", pady=(4, 0))
         ttk.Separator(map_btns, orient="horizontal").pack(fill="x", pady=6)
         ttk.Button(map_btns, text="Save Mappings…", command=self._save_mappings).pack(fill="x")
         ttk.Button(map_btns, text="Load Mappings…", command=self._load_mappings).pack(fill="x", pady=(4, 0))
@@ -642,6 +715,9 @@ class App:
         )
         ttk.Button(rec, text="Save Recording As…", command=self._save_recording).grid(
             row=0, column=2, sticky="w", padx=(16, 0)
+        )
+        ttk.Button(rec, text="Discard Recording", command=self._discard_recording).grid(
+            row=0, column=3, sticky="w", padx=(8, 0)
         )
         ttk.Button(rec, text="Load CSV…", command=self._load_recording).grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.play_btn = ttk.Button(rec, text="Play", command=self._play_recording)
@@ -818,6 +894,20 @@ class App:
         self.mappings = [m for m in self.mappings if m is not None]
         self._reload_mapping_tree()
 
+    def _remove_all_mappings(self):
+        if not self.mappings:
+            messagebox.showinfo("Nothing to remove", "There are no mappings to remove.")
+            return
+        if not messagebox.askyesno(
+            "Remove all mappings",
+            f"Remove all {len(self.mappings)} mapping(s)? This can't be undone unless you already "
+            "saved them with Save Mappings…",
+        ):
+            return
+        self.mappings = []
+        self._reload_mapping_tree()
+        self._log("-- all mappings removed --")
+
     def _reload_mapping_tree(self):
         self.map_tree.delete(*self.map_tree.get_children())
         for i, m in enumerate(self.mappings):
@@ -944,6 +1034,23 @@ class App:
         save_csv_rows(path, self.record_buffer)
         self._log(f"-- saved {len(self.record_buffer)} samples to {path} --")
 
+    def _discard_recording(self):
+        if self.recording:
+            messagebox.showwarning("Recording in progress", "Stop recording before discarding it.")
+            return
+        if not self.record_buffer:
+            messagebox.showinfo("Nothing to discard", "There's no recorded sequence in memory.")
+            return
+        if not messagebox.askyesno(
+            "Discard recording",
+            f"Discard the {len(self.record_buffer)}-sample recording in memory? This can't be undone "
+            "unless you already saved it with Save Recording As….",
+        ):
+            return
+        self.record_buffer = []
+        self.record_status_var.set("not recording")
+        self._log("-- recording discarded --")
+
     # ---------- playback ----------
     def _load_recording(self):
         path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
@@ -1019,22 +1126,92 @@ class App:
         if not self.link.is_open:
             messagebox.showwarning("Not connected", "Connect to the Master's serial port first.")
             return
-        if self._upload is not None:
+        if self._uploads:
             messagebox.showwarning("Upload in progress", "Wait for the current upload to finish first.")
             return
         if not self.playback_rows and not self.record_buffer:
             messagebox.showwarning("Nothing to upload", "Record something or load a CSV first.")
             return
-        UploadDialog(self.root, self.playback_rows, self.record_buffer, self._begin_upload)
+        UploadDialog(self.root, self.playback_rows, self.record_buffer, self._begin_upload_batch)
 
-    def _begin_upload(self, rows, node_id, name):
+    def _begin_upload_batch(self, rows, node_ids, name, clear_first=False):
+        # A Node only reacts to ESP-NOW packets addressed to its own id (or a
+        # broadcast), so several Nodes' point streams run fully concurrently
+        # without interfering with each other. Each Node's own start is
+        # staggered by a small offset (see UPLOAD_BATCH_STAGGER_MS) purely so
+        # their remote_record_start/stop control packets — and the SEQ_ACKs
+        # racing back — don't all land in the very same instant; the
+        # streaming itself still overlaps almost completely for any
+        # recording longer than a couple of seconds.
+        self._upload_batch = {"total": len(node_ids), "done": 0, "ok": 0, "failed": 0}
+        for i, node_id in enumerate(node_ids):
+            delay_ms = i * UPLOAD_BATCH_STAGGER_MS if len(node_ids) > 1 else 0
+            if delay_ms > 0:
+                self.root.after(delay_ms, self._begin_upload, rows, node_id, name, clear_first)
+            else:
+                self._begin_upload(rows, node_id, name, clear_first)
+
+    def _finish_node_upload(self, node_id, ok):
+        """Call exactly once when a given Node's upload is fully resolved
+        (saved, explicitly failed, or gave up after the ack retry) — removes
+        it from the in-flight set and, once every Node in a multi-Node batch
+        has resolved, logs/shows a summary line."""
+        self._uploads.pop(node_id, None)
+        if self._upload_batch is not None:
+            self._upload_batch["done"] += 1
+            self._upload_batch["ok" if ok else "failed"] += 1
+            if self._upload_batch["done"] >= self._upload_batch["total"]:
+                total = self._upload_batch["total"]
+                ok_count = self._upload_batch["ok"]
+                failed_count = self._upload_batch["failed"]
+                if total > 1:
+                    fail_note = f", {failed_count} failed" if failed_count else ""
+                    self._log(f"-- upload batch finished: {ok_count}/{total} Node(s) saved successfully{fail_note} --")
+                    self.upload_status_var.set(f"batch upload finished: {ok_count}/{total} succeeded{fail_note}")
+                self._upload_batch = None
+                return
+        self._refresh_upload_status()
+
+    def _set_solo_status(self, node_id, message):
+        """If `node_id` is the only upload currently in flight, show
+        `message` directly — otherwise it'd get silently replaced by nothing
+        once _finish_node_upload removes it from self._uploads, instead of
+        the aggregate status reflecting what actually happened."""
+        if node_id in self._uploads and len(self._uploads) == 1:
+            self.upload_status_var.set(message)
+
+    def _refresh_upload_status(self):
+        if not self._uploads:
+            return
+        if len(self._uploads) == 1:
+            (node_id, st), = self._uploads.items()
+            if st["phase"] == "waiting_ack":
+                self.upload_status_var.set(f"'{st['name']}' sent to Node {node_id} — waiting for confirmation…")
+            else:
+                self.upload_status_var.set(
+                    f"uploading '{st['name']}' to Node {node_id}… {st['index']}/{len(st['plan'])}"
+                )
+            return
+        waiting = sum(1 for st in self._uploads.values() if st["phase"] == "waiting_ack")
+        sent = sum(st["index"] for st in self._uploads.values())
+        total_points = sum(len(st["plan"]) for st in self._uploads.values())
+        names = {st["name"] for st in self._uploads.values()}
+        name = next(iter(names)) if len(names) == 1 else "sequences"
+        done_note = f", {self._upload_batch['done']}/{self._upload_batch['total']} Node(s) finished" if self._upload_batch else ""
+        self.upload_status_var.set(
+            f"uploading '{name}' to {len(self._uploads)} Node(s){done_note} — "
+            f"{sent}/{total_points} points sent, {waiting} awaiting confirmation"
+        )
+
+    def _begin_upload(self, rows, node_id, name, clear_first=False):
         points = [(t, s[node_id]) for t, s in rows if node_id in s]
         if not points:
             messagebox.showerror("Upload failed", f"No data for Node {node_id} in the selected source.")
+            self._finish_node_upload(node_id, ok=False)
             return
         if points[-1][0] > UPLOAD_MAX_DURATION_MS:
             points = [(t, a) for t, a in points if t <= UPLOAD_MAX_DURATION_MS]
-            self._log(f"-- upload truncated to {UPLOAD_MAX_DURATION_MS / 1000:.0f}s (Node capacity) --")
+            self._log(f"-- upload to Node {node_id} truncated to {UPLOAD_MAX_DURATION_MS / 1000:.0f}s (Node capacity) --")
 
         # Resample to a dense, single-node point list at real-time pace —
         # the same mechanism CSV playback uses, just targeting one Node and
@@ -1043,111 +1220,182 @@ class App:
         single_node_rows = [(t, {node_id: a}) for t, a in points]
         plan = resample_rows(single_node_rows, TICK_INTERVAL_MS, 1.0)
 
-        self._upload = {"node": node_id, "name": name, "plan": plan, "index": 0, "retried": False}
-        self.upload_status_var.set(f"uploading '{name}' to Node {node_id}… 0/{len(plan)}")
-        self._log(f"-- upload starting: Node {node_id} as '{name}' ({len(plan)} points) --")
+        needed_bytes = estimate_sequence_file_bytes(points[-1][0])
+        self._uploads[node_id] = {
+            "name": name, "plan": plan, "index": 0, "retried": False, "job": None, "phase": "start",
+            "needed_bytes": needed_bytes,
+        }
+        self._refresh_upload_status()
+
+        self.space_replies.pop(node_id, None)
+        self._log(f"-- checking free space on Node {node_id} (recording needs ~{needed_bytes} bytes) --")
+        try:
+            self.link.send({"cmd": "space_query", "node": node_id})
+        except (RuntimeError, serial.SerialException, OSError) as exc:
+            self._log(f"-- space query failed (Node {node_id}): {exc} --")
+        self._uploads[node_id]["job"] = self.root.after(
+            SPACE_QUERY_TIMEOUT_MS, self._check_space_reply, node_id, clear_first
+        )
+
+    def _check_space_reply(self, node_id, clear_first):
+        state = self._uploads.get(node_id)
+        if state is None:
+            return
+        needed_bytes = state["needed_bytes"]
+        free_bytes = self.space_replies.get(node_id)
+
+        if free_bytes is not None and free_bytes < needed_bytes:
+            self._log(
+                f"-- upload to Node {node_id} aborted: only {free_bytes} bytes free, recording "
+                f"needs ~{needed_bytes} — delete old sequences on it (or check 'Clear Node's saved "
+                f"recordings before uploading') and try again --"
+            )
+            self._set_solo_status(
+                node_id, f"Node {node_id}: not enough space ({free_bytes} free, needs ~{needed_bytes})"
+            )
+            self._finish_node_upload(node_id, ok=False)
+            return
+        if free_bytes is not None:
+            self._log(f"-- Node {node_id} has {free_bytes} bytes free, proceeding --")
+        else:
+            self._log(
+                f"-- no space reply from Node {node_id} within {SPACE_QUERY_TIMEOUT_MS}ms "
+                "(dropped packet, most likely) — uploading anyway --"
+            )
+
+        if clear_first:
+            self._log(f"-- clearing Node {node_id}'s saved recordings before upload --")
+            try:
+                self.link.send({"cmd": "remote_clear", "node": node_id})
+            except (RuntimeError, serial.SerialException, OSError) as exc:
+                self._log(f"-- clear request failed (Node {node_id}): {exc} --")
+            state["job"] = self.root.after(UPLOAD_CLEAR_SETTLE_MS, self._send_upload_start, node_id)
+        else:
+            self._send_upload_start(node_id)
+
+    def _send_upload_start(self, node_id):
+        state = self._uploads.get(node_id)
+        if state is None:
+            return
+        self._log(f"-- upload starting: Node {node_id} as '{state['name']}' ({len(state['plan'])} points) --")
         try:
             self.link.send({"cmd": "remote_record_start", "node": node_id})
         except (RuntimeError, serial.SerialException, OSError) as exc:
-            self._log(f"-- upload failed to start: {exc} --")
-            self._upload = None
-            self.upload_status_var.set("")
+            self._log(f"-- upload to Node {node_id} failed to start: {exc} --")
+            self._set_solo_status(node_id, f"upload to Node {node_id} failed to start (send error)")
+            self._finish_node_upload(node_id, ok=False)
             return
-        self._upload_job = self.root.after(
-            UPLOAD_START_RESEND_INTERVAL_MS, self._resend_upload_start, UPLOAD_START_RESENDS - 1
+        state["job"] = self.root.after(
+            UPLOAD_START_RESEND_INTERVAL_MS, self._resend_upload_start, node_id, UPLOAD_START_RESENDS - 1
         )
 
-    def _resend_upload_start(self, remaining):
-        if self._upload is None:
+    def _resend_upload_start(self, node_id, remaining):
+        state = self._uploads.get(node_id)
+        if state is None:
             return
         if remaining > 0:
             try:
-                self.link.send({"cmd": "remote_record_start", "node": self._upload["node"]})
+                self.link.send({"cmd": "remote_record_start", "node": node_id})
             except (RuntimeError, serial.SerialException, OSError) as exc:
-                self._log(f"-- upload start resend failed: {exc} --")
-            self._upload_job = self.root.after(
-                UPLOAD_START_RESEND_INTERVAL_MS, self._resend_upload_start, remaining - 1
+                self._log(f"-- upload start resend failed (Node {node_id}): {exc} --")
+            state["job"] = self.root.after(
+                UPLOAD_START_RESEND_INTERVAL_MS, self._resend_upload_start, node_id, remaining - 1
             )
         else:
-            self._upload_job = self.root.after(
-                UPLOAD_START_RESEND_INTERVAL_MS, self._upload_send_next_point
+            state["phase"] = "streaming"
+            state["job"] = self.root.after(
+                UPLOAD_START_RESEND_INTERVAL_MS, self._upload_send_next_point, node_id
             )
 
-    def _upload_send_next_point(self):
-        if self._upload is None:
+    def _upload_send_next_point(self, node_id):
+        state = self._uploads.get(node_id)
+        if state is None:
             return
-        plan = self._upload["plan"]
-        idx = self._upload["index"]
+        plan = state["plan"]
+        idx = state["index"]
         if idx >= len(plan):
-            self._finish_upload_stream()
+            self._finish_upload_stream(node_id)
             return
 
         t_ms, sample = plan[idx]
-        angle = sample[self._upload["node"]]
+        angle = sample[node_id]
         try:
-            self.link.send({"node": self._upload["node"], "angle": round(angle, 1)})
+            self.link.send({"node": node_id, "angle": round(angle, 1)})
         except (RuntimeError, serial.SerialException, OSError) as exc:
-            self._log(f"-- upload send failed, aborting: {exc} --")
-            self.upload_status_var.set("upload failed (send error)")
-            self._upload = None
+            self._log(f"-- upload send failed, aborting (Node {node_id}): {exc} --")
+            self._set_solo_status(node_id, f"upload to Node {node_id} failed (send error)")
+            self._finish_node_upload(node_id, ok=False)
             return
 
-        self._upload["index"] = idx + 1
-        self.upload_status_var.set(
-            f"uploading '{self._upload['name']}' to Node {self._upload['node']}… {idx + 1}/{len(plan)}"
-        )
+        state["index"] = idx + 1
+        self._refresh_upload_status()
 
         next_idx = idx + 1
         delay_ms = max(1, plan[next_idx][0] - t_ms) if next_idx < len(plan) else 1
-        self._upload_job = self.root.after(delay_ms, self._upload_send_next_point)
+        state["job"] = self.root.after(delay_ms, self._upload_send_next_point, node_id)
 
-    def _finish_upload_stream(self):
-        if self._upload is None:
+    def _finish_upload_stream(self, node_id):
+        state = self._uploads.get(node_id)
+        if state is None:
             return
-        self._log(f"-- upload stream sent, asking Node {self._upload['node']} to save as '{self._upload['name']}' --")
+        self._log(f"-- upload stream sent, asking Node {node_id} to save as '{state['name']}' --")
         try:
-            self.link.send({"cmd": "remote_record_stop", "node": self._upload["node"], "name": self._upload["name"]})
+            self.link.send({"cmd": "remote_record_stop", "node": node_id, "name": state["name"]})
         except (RuntimeError, serial.SerialException, OSError) as exc:
-            self._log(f"-- upload save request failed: {exc} --")
-            self.upload_status_var.set("upload failed (send error)")
-            self._upload = None
+            self._log(f"-- upload save request failed (Node {node_id}): {exc} --")
+            self._set_solo_status(node_id, f"upload to Node {node_id} failed (send error)")
+            self._finish_node_upload(node_id, ok=False)
             return
-        self.upload_status_var.set("waiting for the Node to confirm the save…")
-        self._upload_job = self.root.after(UPLOAD_ACK_TIMEOUT_MS, self._on_upload_ack_timeout)
+        state["phase"] = "waiting_ack"
+        self._refresh_upload_status()
+        state["job"] = self.root.after(UPLOAD_ACK_TIMEOUT_MS, self._on_upload_ack_timeout, node_id)
 
-    def _on_upload_ack_timeout(self):
-        if self._upload is None:
+    def _on_upload_ack_timeout(self, node_id):
+        state = self._uploads.get(node_id)
+        if state is None:
             return
-        if self._upload["retried"]:
-            self._log("-- no upload confirmation received (retried once) — it may not have saved --")
-            self.upload_status_var.set("no confirmation received — check the Node")
-            self._upload = None
+        if state["retried"]:
+            self._log(
+                f"-- no upload confirmation received from Node {node_id} (retried once) — it "
+                "may have lost power/reset, moved out of range, or its stop request/reply was "
+                "dropped twice in a row; it may not have saved --"
+            )
+            self._set_solo_status(node_id, f"Node {node_id}: no confirmation received — it may not have saved")
+            self._finish_node_upload(node_id, ok=False)
             return
-        self._log("-- no upload confirmation yet, retrying the save request once --")
-        self._upload["retried"] = True
+        self._log(f"-- no upload confirmation yet from Node {node_id}, retrying the save request once --")
+        state["retried"] = True
         try:
-            self.link.send({"cmd": "remote_record_stop", "node": self._upload["node"], "name": self._upload["name"]})
+            self.link.send({"cmd": "remote_record_stop", "node": node_id, "name": state["name"]})
         except (RuntimeError, serial.SerialException, OSError):
             pass
-        self._upload_job = self.root.after(UPLOAD_ACK_TIMEOUT_MS, self._on_upload_ack_timeout)
+        state["job"] = self.root.after(UPLOAD_ACK_TIMEOUT_MS, self._on_upload_ack_timeout, node_id)
 
     def _on_upload_ack(self, msg):
-        if self._upload is None or msg.get("node") != self._upload["node"] or msg.get("name") != self._upload["name"]:
+        node_id = msg.get("node")
+        state = self._uploads.get(node_id)
+        if state is None or msg.get("name") != state["name"]:
             return  # stray/unrelated ack — ignore rather than clobber an unrelated in-progress upload
-        if self._upload_job is not None:
-            self.root.after_cancel(self._upload_job)
-            self._upload_job = None
+        if state["job"] is not None:
+            self.root.after_cancel(state["job"])
+            state["job"] = None
         ok = bool(msg.get("ok"))
         points = msg.get("points", 0)
         name = msg.get("name")
-        node = msg.get("node")
+        reason = msg.get("reason", "")
         if ok:
-            self._log(f"-- upload confirmed: Node {node} saved '{name}' ({points} points) --")
-            self.upload_status_var.set(f"'{name}' saved on Node {node} ({points} points)")
+            self._log(f"-- upload confirmed: Node {node_id} saved '{name}' ({points} points) --")
         else:
-            self._log(f"-- upload failed on Node {node}: could not save '{name}' --")
-            self.upload_status_var.set(f"Node {node} failed to save '{name}'")
-        self._upload = None
+            reason_note = f" — {reason}" if reason else ""
+            self._log(f"-- upload failed on Node {node_id}: could not save '{name}'{reason_note} --")
+        if len(self._uploads) == 1:
+            # The only one in flight — its result is the whole picture, so
+            # show it directly instead of the multi-Node aggregate.
+            self.upload_status_var.set(
+                f"'{name}' saved on Node {node_id} ({points} points)" if ok
+                else f"Node {node_id} failed to save '{name}'" + (f": {reason}" if reason else "")
+            )
+        self._finish_node_upload(node_id, ok=ok)
 
     # ---------- incoming serial data ----------
     def _drain_incoming(self):
@@ -1173,6 +1421,10 @@ class App:
             self.known_nodes = {n["id"]: n for n in msg.get("nodes", []) if "id" in n}
         elif isinstance(msg, dict) and msg.get("type") == "upload_result":
             self._on_upload_ack(msg)
+        elif isinstance(msg, dict) and msg.get("type") == "space_reply":
+            node_id = msg.get("node")
+            if node_id is not None and "free_bytes" in msg:
+                self.space_replies[node_id] = msg["free_bytes"]
 
     def _log(self, line):
         self.log_text.configure(state="normal")
@@ -1189,8 +1441,9 @@ class App:
             self.root.after_cancel(self._tick_job)
         if self._node_poll_job is not None:
             self.root.after_cancel(self._node_poll_job)
-        if self._upload_job is not None:
-            self.root.after_cancel(self._upload_job)
+        for state in self._uploads.values():
+            if state["job"] is not None:
+                self.root.after_cancel(state["job"])
         self._stop_playback()
         self.link.disconnect()
         pygame.quit()

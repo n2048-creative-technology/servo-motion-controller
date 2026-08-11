@@ -72,6 +72,36 @@ void SerialBridge::handleLine(const char *line) {
     return;
   }
 
+  if (strcmp(cmd, "remote_clear") == 0) {
+    if (!doc["node"].is<int>()) {
+      Serial.println("{\"ok\":false,\"error\":\"expected node\"}");
+      return;
+    }
+    int node = doc["node"].as<int>();
+    if (node < 0 || node > NET_NODE_ID_MAX) {
+      Serial.println("{\"ok\":false,\"error\":\"node out of range\"}");
+      return;
+    }
+    bool ok = network_->sendSeqClear(static_cast<uint8_t>(node));
+    Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+    return;
+  }
+
+  if (strcmp(cmd, "space_query") == 0) {
+    if (!doc["node"].is<int>()) {
+      Serial.println("{\"ok\":false,\"error\":\"expected node\"}");
+      return;
+    }
+    int node = doc["node"].as<int>();
+    if (node < 0 || node > NET_NODE_ID_MAX) {
+      Serial.println("{\"ok\":false,\"error\":\"node out of range\"}");
+      return;
+    }
+    bool ok = network_->sendSpaceQuery(static_cast<uint8_t>(node));
+    Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+    return;
+  }
+
   if (strcmp(cmd, "list") == 0) {
     JsonDocument out;
     out["type"] = "nodes";
@@ -107,13 +137,38 @@ void SerialBridge::handleLine(const char *line) {
   Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
 }
 
-void SerialBridge::reportUploadResult(uint8_t nodeId, const char *name, bool ok, uint16_t points) {
+namespace {
+const char *seqAckStatusReason(SeqAckStatus status) {
+  switch (status) {
+    case SeqAckStatus::Ok: return "";
+    case SeqAckStatus::NoPointsCaptured:
+      return "Node captured no movement — its start request likely never arrived, or it lost "
+             "power/reset partway through the transfer";
+    case SeqAckStatus::InvalidName: return "sequence name was invalid after sanitizing";
+    case SeqAckStatus::WriteFailed: return "Node failed to write the file (its flash may be full)";
+    default: return "unknown failure";
+  }
+}
+} // namespace
+
+void SerialBridge::reportUploadResult(uint8_t nodeId, const char *name, SeqAckStatus status, uint16_t points) {
   JsonDocument out;
   out["type"] = "upload_result";
   out["node"] = nodeId;
   out["name"] = name;
-  out["ok"] = ok;
+  out["ok"] = status == SeqAckStatus::Ok;
   out["points"] = points;
+  if (status != SeqAckStatus::Ok) out["reason"] = seqAckStatusReason(status);
+  String outStr;
+  serializeJson(out, outStr);
+  Serial.println(outStr);
+}
+
+void SerialBridge::reportSpaceReply(uint8_t nodeId, uint32_t freeBytes) {
+  JsonDocument out;
+  out["type"] = "space_reply";
+  out["node"] = nodeId;
+  out["free_bytes"] = freeBytes;
   String outStr;
   serializeJson(out, outStr);
   Serial.println(outStr);

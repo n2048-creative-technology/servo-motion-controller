@@ -88,6 +88,8 @@ Workflow:
    in and click Refresh Controllers — it isn't lost, and reattaches
    automatically once that controller (matched by GUID, or by name as a
    fallback for files saved by an older version of this tool) is back.
+   **Remove All** clears every mapping at once (with a confirmation prompt)
+   instead of selecting them one by one.
 4. Check **Stream mapped axes to their Nodes** to start sending — every
    mapped axis, across all connected controllers, is recalculated ~25 Hz and
    only resent when it moves more than ~0.2°, to avoid flooding the link
@@ -118,19 +120,56 @@ Workflow:
    exactly on the final recorded position.
 7. **Upload to Node…** pushes a recording onto a Node's own flash instead of
    just replaying it live: pick a source (the loaded CSV or your last live
-   recording), a single Node ID present in it, and a name. Only that Node's
-   own column is ever sent — the other Nodes' data in the same recording
-   never reaches it — streamed through the Master at real-time pace (via
+   recording), a Node ID present in it (or check **Upload to all Nodes
+   present in source** to push every Node's own column to its Node at
+   once), and a name. Each Node only ever receives its own column — never
+   another Node's data — streamed through the Master at real-time pace (via
    `remote_record_start`/`remote_record_stop`, see
-   [../docs/serial-protocol.md](../docs/serial-protocol.md)). The Node saves
-   it and can then loop it on every boot via its own Settings → Autostart,
-   completely standalone — no PC, Master, or controller needed afterward.
-   Long recordings (over 10 minutes, a Node's own capacity) are truncated
-   with a warning. The start request is sent redundantly (a lost one is
-   otherwise invisible — the Node still moves on every point of the stream
-   that follows regardless of whether it actually started recording) and a
-   failed/lost stop-and-save confirmation is retried once automatically;
-   the log and the status line next to the button show what happened.
+   [../docs/serial-protocol.md](../docs/serial-protocol.md)). Multiple
+   Nodes' uploads run concurrently rather than queued one after another —
+   each Node's point stream overlaps almost completely with the others —
+   with only a small (~150ms per Node) stagger to their start, so their
+   remote_record_start/stop control packets and SEQ_ACK replies don't all
+   land in the same instant and collide (real hardware testing without this
+   staggering showed every Node's ack getting lost when four uploads landed
+   at once). The status line/log track each Node's own progress plus a
+   combined summary once every Node in the batch has finished. Each Node
+   saves its sequence and can then loop it on every
+   boot via its own Settings → Autostart, completely standalone — no PC,
+   Master, or controller needed afterward. Long recordings (over 10
+   minutes, a Node's own capacity) are truncated with a warning per Node.
+   The start request is sent redundantly (a lost one is otherwise invisible
+   — the Node still moves on every point of the stream that follows
+   regardless of whether it actually started recording) and a failed/lost
+   stop-and-save confirmation is retried once automatically. Re-uploading a
+   name that already exists on a Node overwrites it. Check **Clear Node's
+   saved recordings before uploading** to have each target Node delete every
+   sequence it's currently holding (`remote_clear`, see
+   [../docs/serial-protocol.md](../docs/serial-protocol.md)) right before its
+   own upload starts — a clean slate, e.g. to keep a Node's flash from
+   accumulating a pile of one-off names over many test uploads. Before
+   streaming anything, each Node's upload also asks it how much flash space
+   it has free (`space_query`) and estimates the recording's on-disk size
+   from its duration — if the Node's own reply shows there isn't enough
+   room, that Node's upload is aborted immediately with a clear error
+   instead of streaming for the full duration only to fail at the very end;
+   a Node that doesn't answer within ~800ms (a dropped packet, not
+   necessarily a real problem) just gets uploaded to anyway. A failure's log
+   line and status text explain *why* where possible — a Node that captured
+   no movement at all most often means either its start request never
+   arrived or **it lost power and reset partway through the transfer**:
+   recordings with frequent large, fast swings can brown out a Node from the
+   servo's own current draw and reset it mid-upload — this is a power-supply
+   characteristic, not a firmware bug (see
+   [../docs/serial-protocol.md](../docs/serial-protocol.md) for how this was
+   isolated). If uploads fail specifically on your highest-motion
+   recordings, that's the first thing to check.
+8. **Discard Recording** clears the in-memory recording buffer (the one
+   **Save Recording As…**/**Upload to Node…** would use) without writing it
+   anywhere — a confirmation prompt guards against losing an unsaved take.
+   To clear what's already saved *on a Node's own flash*, either check
+   **Clear Node's saved recordings before uploading** in the Upload dialog,
+   or use the **Clear All** button in that Node's own web UI (Record tab).
 
 The axis-mapping math, CSV round-trip, and upload data-extraction/resampling
 logic are all unit-tested, and the window itself has been launched and

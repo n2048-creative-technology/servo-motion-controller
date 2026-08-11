@@ -43,14 +43,39 @@ that reaches it both moves its servo *and* gets captured. When done:
 {"cmd": "remote_record_stop", "node": 3, "name": "dance1"}
 ```
 `name` is sanitized to `[A-Za-z0-9_-]`, truncated to 23 characters. The Node
-saves whatever it captured as `/seq/<name>.bin` and reports back
-asynchronously (see `upload_result` below) — this can take a moment, since it
-travels Node → Master over ESP-NOW after the save completes. A Node's
-recording buffer caps at `MAX_SEQ_POINTS × RECORD_INTERVAL_MS` (10 minutes by
-default); don't stream longer than that or the excess is silently dropped.
-`scripts-tools/joystick_master_gui.py`'s "Upload to Node…" button implements
-this whole flow, including only ever sending one Node's own column from a
-multi-node recording (see its README).
+saves whatever it captured as `/seq/<name>.bin` — overwriting any existing
+file of that name — and reports back asynchronously (see `upload_result`
+below) — this can take a moment, since it travels Node → Master over ESP-NOW
+after the save completes. A Node's recording buffer caps at `MAX_SEQ_POINTS ×
+RECORD_INTERVAL_MS` (10 minutes by default); don't stream longer than that or
+the excess is silently dropped. `scripts-tools/joystick_master_gui.py`'s
+"Upload to Node…" button implements this whole flow, including only ever
+sending one Node's own column from a multi-node recording (see its README).
+
+**Clear a Node's saved recordings** — deletes every sequence file on that
+Node, same effect as its own web UI's "Clear All" button in the Record tab:
+```json
+{"cmd": "remote_clear", "node": 3}
+```
+Unlike the upload commands above, this has no delivery confirmation (no
+`upload_result`-style reply) — it's a one-shot housekeeping step, so the reply
+`{"ok":true}` only means the Master queued the ESP-NOW send locally, not that
+the Node actually received and finished it. `joystick_master_gui.py`'s Upload
+dialog has a "Clear Node's saved recordings before uploading" checkbox that
+sends this and waits a short settle time before starting the upload.
+
+**Check a Node's free space** — an upload preflight check, asking how much
+LittleFS space a Node has left before streaming a recording to it:
+```json
+{"cmd": "space_query", "node": 3}
+```
+Replies asynchronously (see `space_reply` below), same fire-and-forget
+delivery characteristics as `remote_clear` — no guarantee it arrives or that
+a reply comes back. `joystick_master_gui.py`'s Upload dialog sends this
+automatically before every upload, estimates the recording's on-disk size
+from its duration, and aborts that Node's upload with a clear error if the
+reply shows insufficient space; if no reply arrives within ~800ms it uploads
+anyway rather than blocking on an unreliable link.
 
 ## Replies (Master → PC)
 
@@ -62,9 +87,14 @@ multi-node recording (see its README).
 - `upload_result` (asynchronous, arrives whenever the Node's own SEQ_ACK
   makes it back — could be well after the `remote_record_stop` reply):
   `{"type":"upload_result","node":3,"name":"dance1","ok":true,"points":842}`.
-  `ok:false` means the Node received the stop request but failed to save
-  (e.g. an invalid name); no reply at all after a few seconds means the
+  `ok:false` means the Node received the stop request but failed to save;
+  a `"reason"` string is included explaining why (no movement was ever
+  captured — most often because the start request never arrived, or the
+  Node lost power/reset partway through; an invalid name; or a write
+  failure, e.g. out of space). No reply at all after a few seconds means the
   stop request itself likely didn't arrive — resend it.
+- `space_reply` (asynchronous, reply to `space_query`):
+  `{"type":"space_reply","node":3,"free_bytes":48200}`.
 - Malformed line: `{"ok":false,"error":"bad_json"}`
 
 Every reply is also one line, `\n`-terminated.
@@ -114,6 +144,25 @@ This is why **Master and every Node must run matching firmware** — a
 `NET_PACKET_VERSION` mismatch (bumped whenever the packet layout changes,
 as it did for this ordering fix) makes them silently ignore each other
 rather than misinterpret each other's bytes.
+
+### A Node can reset mid-upload on fast/large movements — this is a power issue, not a protocol one
+
+Uploading a recording with frequent large, rapid swings (e.g. repeatedly
+slewing close to a servo's full 0–270° range within a couple of ticks) can
+brown out a Node and reset it mid-transfer, purely from the servo's own
+current draw spiking faster than its power supply can source — confirmed by
+reproducing it with real recorded joystick data, then ruling out every
+software explanation: the *identical* recording succeeds after a fresh
+reboot, and a gentle low-amplitude recording of the same duration succeeds
+reliably on the exact same board and firmware every time, while the
+high-motion one fails consistently. ESP-NOW/servo software can't distinguish
+this from ordinary packet loss — it just sees the Node go silent and its
+retry/timeout logic (and the `NoPointsCaptured` reason above) kick in the
+same as any other dropped connection. If uploads fail specifically on
+high-motion recordings: give the servo(s) their own adequately-sized supply
+rather than sharing the ESP32's own rail, add bulk capacitance near the
+servo, or — if that's not practical mid-show — favor recordings with gentler
+transitions.
 
 ## Requirements for this to work
 
