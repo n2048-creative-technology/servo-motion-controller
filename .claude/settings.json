@@ -56,7 +56,13 @@
       "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_csv_upload_test.py)",
       "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_resend_test.py)",
       "Bash(rm -f \"/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_resend_test.py\" \"/tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_stress_test.py\")",
-      "Bash(cd /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/firmware *)"
+      "Bash(cd /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/firmware *)",
+      "Bash(DISPLAY=:1 /home/mauricio/Documents/PlatformIO/Projects/servo-motion-controller/scripts-tools/.venv/bin/python3 -u /tmp/claude-1000/-home-mauricio-Documents-PlatformIO-Projects-servo-motion-controller/634d6495-0dbb-4d0c-bbd8-94eb8c8dd9c8/scratchpad/drive_long_test.py)",
+      "Bash(sleep 2; ls /dev/ttyACM* 2>/dev/null)",
+      "Bash(fuser /dev/ttyACM0)",
+      "Bash(for i in 1 2 3 4 5 6; do *)",
+      "Bash(python3 -c ' *)",
+      "Bash(udevadm settle *)"
     ]
   }
 }

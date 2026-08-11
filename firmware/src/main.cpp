@@ -94,8 +94,18 @@ void setup() {
     // path in PlaybackEngine::tick(), since onNetworkCommand already leaves
     // RECORDING mode untouched.
     networkLink.onSeqStart([]() {
-      sequenceStore.startRecording();
-      playback.startRecording(millis());
+      // A Master resends SEQ_START several times for delivery robustness —
+      // a lost one is otherwise invisible, since the servo still moves on
+      // ordinary CMD packets regardless of recording state (see
+      // onNetworkCommand above). Without this guard, a duplicate that's
+      // merely delayed rather than lost — arriving after capture is
+      // already under way — would silently reset the in-progress
+      // recording back to empty. Once actually recording, further starts
+      // are a no-op until the matching SEQ_STOP.
+      if (playback.mode() != PlaybackMode::RECORDING) {
+        sequenceStore.startRecording();
+        playback.startRecording(millis());
+      }
     });
     networkLink.onSeqStop([](const char *name) {
       playback.stopRecording();

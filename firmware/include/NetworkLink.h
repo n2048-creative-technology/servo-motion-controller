@@ -148,6 +148,20 @@ private:
   bool pendingAckOk_ = false;
   uint16_t pendingAckPoints_ = 0;
 
+  // Same reasoning as pendingSeqAck_ above, but for the Node side: onSeqStop
+  // triggers SequenceStore::saveAs(), a full LittleFS file write that can
+  // take a while for a long recording (up to ~96KB at the current cap).
+  // Doing that — or even just mutating PlaybackEngine/SequenceStore state
+  // from onSeqStart — directly from the WiFi driver's own task instead of
+  // loop()'s risks starving that task long enough to trip the watchdog and
+  // reboot the board (observed in practice: a crash landing right as a long
+  // upload's save begins). Deferring both to loopTick() keeps all of that
+  // work on loop()'s task, same as every other SequenceStore/PlaybackEngine
+  // access in this codebase.
+  bool pendingSeqStart_ = false;
+  bool pendingSeqStop_ = false;
+  char pendingStopName_[24] = {0};
+
   void recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now);
   void recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t now);
   bool transmitCommand(uint8_t targetNode, float angleDeg);

@@ -73,6 +73,15 @@ void NetworkLink::loopTick(uint32_t now) {
     pendingSeqAck_ = false;
     if (seqAckCb_) seqAckCb_(pendingAckNodeId_, pendingAckName_, pendingAckOk_, pendingAckPoints_);
   }
+
+  if (pendingSeqStart_) {
+    pendingSeqStart_ = false;
+    if (seqStartCb_) seqStartCb_();
+  }
+  if (pendingSeqStop_) {
+    pendingSeqStop_ = false;
+    if (seqStopCb_) seqStopCb_(pendingStopName_);
+  }
 }
 
 bool NetworkLink::transmitCommand(uint8_t targetNode, float angleDeg) {
@@ -208,11 +217,15 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     if (nodeCommandCb_) nodeCommandCb_(pkt.angleDeg);
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_START) {
     if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
-    if (seqStartCb_) seqStartCb_();
+    // Deferred to loopTick() — see the pendingSeqStart_/pendingSeqStop_
+    // fields' comment in NetworkLink.h.
+    pendingSeqStart_ = true;
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_STOP) {
     if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
     pkt.seqName[sizeof(pkt.seqName) - 1] = '\0'; // defensive: never trust a wire string is terminated
-    if (seqStopCb_) seqStopCb_(pkt.seqName);
+    strncpy(pendingStopName_, pkt.seqName, sizeof(pendingStopName_) - 1);
+    pendingStopName_[sizeof(pendingStopName_) - 1] = '\0';
+    pendingSeqStop_ = true;
   } else if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_SEQ_ACK) {
     pkt.seqName[sizeof(pkt.seqName) - 1] = '\0';
     // Deferred to loopTick() rather than calling seqAckCb_ here directly —
