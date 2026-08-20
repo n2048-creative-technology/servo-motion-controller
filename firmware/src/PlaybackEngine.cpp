@@ -84,6 +84,13 @@ void PlaybackEngine::tick(uint32_t now) {
   }
 }
 
+uint32_t PlaybackEngine::sequencePositionMs(uint32_t now) const {
+  if (mode_ != PlaybackMode::SEQUENCE || sequence_ == nullptr) return 0;
+  const uint32_t duration = sequence_->durationMs();
+  if (duration == 0) return 0;
+  return (now - modeStartMs_) % duration;
+}
+
 void PlaybackEngine::onJog(float xDeg, float yDeg, uint32_t now) {
   servos_->writeAngles(xDeg, yDeg);
   if (mode_ != PlaybackMode::RECORDING) {

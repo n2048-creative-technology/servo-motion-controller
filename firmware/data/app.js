@@ -36,7 +36,10 @@
   let patternCatalog = []; // [{type,label,params:[...]}]
   let ws = null;
   let lastStatus = null;
-  let recTrace = []; // {t, angle} while recording, relative ms
+  let recTrace = []; // {t, x, y, relay} while recording, relative ms
+  // A saved sequence pulled back off the board for plotting, or null to show
+  // the live recording trace instead. {name, durationMs, samples:[...]}.
+  let plotView = null;
   let isMaster = false;
   let knownNodes = []; // [{id,angle,age_ms}] from /api/network/nodes
   let targetAllMode = true;
@@ -112,6 +115,9 @@
     } else if (recTrace.length && s.recording && s.recording.points === 0) {
       recTrace = [];
       drawTrace();
+    } else if (plotView && playheadMsFor(plotView) !== null) {
+      // Sequence playing and on screen: redraw so the playhead tracks it.
+      drawTrace();
     }
 
     // Keep the trackpad in sync when the head is being driven by something
@@ -161,14 +167,35 @@
       `<br><code>pio run -e &lt;env&gt; -t upload</code> &nbsp;then&nbsp; <code>pio run -e &lt;env&gt; -t uploadfs</code>`;
   }
 
+  // The live trace wins whenever a recording is running — that's the thing
+  // you're watching. Otherwise a selected saved sequence is shown, falling
+  // back to whatever was just recorded but not yet saved or discarded.
+  function plotSource() {
+    const recActive = lastStatus && lastStatus.recording && lastStatus.recording.active;
+    if (recActive || !plotView) return { samples: recTrace, playheadMs: null };
+    return { samples: plotView.samples, playheadMs: playheadMsFor(plotView) };
+  }
+
+  // Where playback has got to, but only when the sequence actually playing is
+  // the one on screen — otherwise the line would track something you aren't
+  // looking at.
+  function playheadMsFor(view) {
+    const seq = lastStatus && lastStatus.sequence;
+    if (!seq || !seq.playing || seq.name !== view.name) return null;
+    if (typeof seq.position_ms !== "number") return null;
+    return seq.position_ms;
+  }
+
   function drawTrace() {
     const canvas = $("recCanvas");
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (recTrace.length < 2) return;
 
-    const tMin = recTrace[0].t;
-    const tMax = recTrace[recTrace.length - 1].t;
+    const { samples, playheadMs } = plotSource();
+    if (samples.length < 2) return;
+
+    const tMin = samples[0].t;
+    const tMax = samples[samples.length - 1].t;
     const tSpan = Math.max(1, tMax - tMin);
     const laneTop = canvas.height - TRACE_LANE_H;
     const plotH = laneTop - TRACE_LANE_GAP;
@@ -183,14 +210,14 @@
     // reads as a dashed lane rather than a solid one (measured: 8 broken runs
     // across two lit stretches). Each sample holds its state until the next —
     // the same step semantics playback uses (SequenceStore::relayAtTime).
-    const n = recTrace.length;
+    const n = samples.length;
     let i = 0;
     while (i < n) {
-      if (!recTrace[i].relay) { i++; continue; }
+      if (!samples[i].relay) { i++; continue; }
       let j = i;
-      while (j + 1 < n && recTrace[j + 1].relay) j++;
-      const x0 = xAt(recTrace[i]);
-      const x1 = xAt(recTrace[Math.min(j + 1, n - 1)]);
+      while (j + 1 < n && samples[j + 1].relay) j++;
+      const x0 = xAt(samples[i]);
+      const x1 = xAt(samples[Math.min(j + 1, n - 1)]);
       const w = Math.max(1, x1 - x0);
       ctx.fillStyle = "#e0a934";
       ctx.fillRect(x0, laneTop, w, TRACE_LANE_H);
@@ -201,17 +228,28 @@
 
     // One line per axis, each scaled to its own calibrated travel so a narrow
     // tilt range still fills the plot instead of hugging the middle.
-    drawAxisLine(ctx, "x", servoLimits.x, "#4da3ff", plotH, xAt);
-    drawAxisLine(ctx, "y", servoLimits.y, "#35c46a", plotH, xAt);
+    drawAxisLine(ctx, samples, "x", servoLimits.x, "#4da3ff", plotH, xAt);
+    drawAxisLine(ctx, samples, "y", servoLimits.y, "#35c46a", plotH, xAt);
+
+    // Playhead last, so it sits over the traces rather than under them.
+    if (playheadMs !== null) {
+      const px = Math.round(((playheadMs - tMin) / tSpan) * canvas.width) + 0.5; // crisp 1px line
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, canvas.height);
+      ctx.stroke();
+    }
   }
 
-  function drawAxisLine(ctx, key, limits, colour, plotH, xAt) {
+  function drawAxisLine(ctx, samples, key, limits, colour, plotH, xAt) {
     const span = Math.max(1, limits.max - limits.min);
     ctx.strokeStyle = colour;
     ctx.lineWidth = 2;
     ctx.beginPath();
     let started = false;
-    recTrace.forEach((p) => {
+    samples.forEach((p) => {
       const v = p[key];
       if (typeof v !== "number") return;
       const px = xAt(p);
@@ -520,6 +558,7 @@
   function initRecordControls() {
     $("recStart").addEventListener("click", () => {
       recTrace = [];
+      clearSequencePlot();
       apiPost("/api/record/start");
     });
     $("recStop").addEventListener("click", () => apiPost("/api/record/stop"));
@@ -545,7 +584,10 @@
     $("seqClearAll").addEventListener("click", () => {
       if (!sequenceCatalog.length) return;
       if (confirm(`Delete all ${sequenceCatalog.length} saved sequence(s) on this board? This can't be undone.`)) {
-        apiPost("/api/sequences/clear").then(refreshSequenceList);
+        apiPost("/api/sequences/clear").then(() => {
+          clearSequencePlot();
+          refreshSequenceList();
+        });
       }
     });
   }
@@ -562,7 +604,7 @@
         ? sequenceCatalog
             .map(
               (s) => `
-        <tr>
+        <tr data-name="${s.name}"${plotView && plotView.name === s.name ? ' class="selected"' : ""}>
           <td>${s.name}</td>
           <td>${s.points}</td>
           <td>${(s.duration_ms / 1000).toFixed(1)}s</td>
@@ -574,19 +616,70 @@
             )
             .join("")
         : '<tr><td colspan="4">no sequences saved</td></tr>';
+      body.querySelectorAll("tr[data-name]").forEach((row) => {
+        // Tapping the row plots it; the buttons inside keep their own jobs.
+        row.addEventListener("click", (e) => {
+          if (e.target.closest("button")) return;
+          showSequencePlot(row.dataset.name);
+        });
+      });
       body.querySelectorAll("[data-play]").forEach((btn) => {
-        btn.addEventListener("click", () => apiPost("/api/sequence/play", { name: btn.dataset.play }));
+        btn.addEventListener("click", () => {
+          // Playing a sequence implies wanting to watch it, so plot it too.
+          showSequencePlot(btn.dataset.play);
+          apiPost("/api/sequence/play", { name: btn.dataset.play });
+        });
       });
       body.querySelectorAll("[data-delete]").forEach((btn) => {
         btn.addEventListener("click", () => {
           if (confirm(`Delete sequence "${btn.dataset.delete}"?`)) {
-            apiPost("/api/sequence/delete", { name: btn.dataset.delete }).then(refreshSequenceList);
+            apiPost("/api/sequence/delete", { name: btn.dataset.delete }).then(() => {
+              // Don't leave the plot showing something that no longer exists.
+              if (plotView && plotView.name === btn.dataset.delete) clearSequencePlot();
+              refreshSequenceList();
+            });
           }
         });
       });
     }
 
     populateSequenceSelect($("asSequenceName"));
+  }
+
+  // Pulls a saved sequence back off the board (downsampled by the firmware)
+  // and shows it on the Record tab's plot.
+  async function showSequencePlot(name) {
+    const data = await apiGet(`/api/sequence/data?name=${encodeURIComponent(name)}`).catch(() => null);
+    if (!data || !Array.isArray(data.points)) {
+      $("plotLabel").textContent = "could not read that recording";
+      return;
+    }
+    plotView = {
+      name: data.name,
+      durationMs: data.duration_ms,
+      hasY: data.has_y !== false,
+      // Compact [t, x, y, light] tuples on the wire — see appendPlotJson.
+      samples: data.points.map((p) => ({ t: p[0], x: p[1], y: data.has_y === false ? undefined : p[2], relay: p[3] === 1 })),
+    };
+    const secs = (data.duration_ms / 1000).toFixed(1);
+    $("plotLabel").textContent = `${data.name} — ${secs}s${data.has_y === false ? " (no tilt track)" : ""}`;
+    markSelectedRow(data.name);
+    drawTrace();
+  }
+
+  function clearSequencePlot() {
+    plotView = null;
+    $("plotLabel").textContent = "live";
+    markSelectedRow(null);
+    drawTrace();
+  }
+
+  function markSelectedRow(name) {
+    const body = $("seqBody");
+    if (!body) return;
+    body.querySelectorAll("tr[data-name]").forEach((row) => {
+      row.classList.toggle("selected", row.dataset.name === name);
+    });
   }
 
   function populateSequenceSelect(selectEl) {

@@ -351,6 +351,7 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   color: var(--text-dim);
 }
 .tracelegend span { display: flex; align-items: center; gap: 6px; }
+.tracelegend .plotlabel { margin-left: auto; color: var(--text); }
 .tracelegend i {
   width: 14px;
   height: 4px;
@@ -444,3 +445,8 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
 
 .tracelegend .sw-x { background: var(--accent); }
 .tracelegend .sw-y { background: var(--go); }
+
+/* Saved-sequence rows are clickable: tapping one plots it above. */
+.nodetable tbody tr[data-name] { cursor: pointer; }
+.nodetable tbody tr.selected { background: #262a31; }
+.nodetable tbody tr.selected td:first-child { color: var(--accent); font-weight: 600; }

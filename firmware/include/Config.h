@@ -108,6 +108,11 @@ static constexpr size_t SEQUENCE_POINT_BYTES_V1 = 8;     // {t, angle, flags, pa
 static constexpr const char *SEQUENCE_DIR = "/seq"; // v2+: one "<name>.bin" file per named sequence
 static constexpr uint8_t SEQ_NAME_MAX_LEN = 23;      // + null terminator = sizeof(NetPacket::seqName)
 static constexpr uint8_t SEQ_MAX_LISTED = 16;        // cap for directory listing / UI dropdowns
+// Ceiling on how many points GET /api/sequence/data returns. The Record tab's
+// plot canvas is 600px wide, so a few hundred samples already draw every
+// feature a longer recording has — sending thousands would cost heap and
+// airtime for pixels that don't exist.
+static constexpr uint16_t SEQ_PLOT_MAX_POINTS = 300;
 static constexpr const char *SEQUENCE_LEGACY_MIGRATED_NAME = "local";
 
 // ---- Settings / NVS ----

@@ -204,6 +204,10 @@ String WebApi::buildStatusJson() {
   sequenceObj["name"] = sequence_->activeName();
   sequenceObj["points"] = sequence_->pointCount();
   sequenceObj["duration_ms"] = sequence_->durationMs();
+  // Drives the web UI's playhead. Only meaningful while a sequence is
+  // actually playing; 0 otherwise.
+  sequenceObj["playing"] = playback_->mode() == PlaybackMode::SEQUENCE;
+  sequenceObj["position_ms"] = playback_->sequencePositionMs(millis());
 
   String out;
   serializeJson(doc, out);
@@ -372,6 +376,30 @@ void WebApi::setupRoutes() {
     }
     String out;
     serializeJson(doc, out);
+    request->send(200, "application/json", out);
+  });
+
+  // A downsampled view of one saved sequence, for plotting it in the Record
+  // tab. Reading a sequence never disturbs whatever is currently playing.
+  server_.on("/api/sequence/data", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    if (!request->hasParam("name")) {
+      request->send(400, "application/json", "{\"ok\":false,\"error\":\"expected name\"}");
+      return;
+    }
+    uint16_t maxPoints = SEQ_PLOT_MAX_POINTS;
+    if (request->hasParam("points")) {
+      const long asked = request->getParam("points")->value().toInt();
+      if (asked > 0) maxPoints = clampValue<uint16_t>(static_cast<uint16_t>(asked), 2, SEQ_PLOT_MAX_POINTS);
+    }
+
+    String out;
+    // Roughly what one point costs as JSON, so the string doesn't spend the
+    // whole build reallocating.
+    out.reserve(64 + maxPoints * 28);
+    if (!sequence_->appendPlotJson(request->getParam("name")->value().c_str(), maxPoints, out)) {
+      request->send(404, "application/json", "{\"ok\":false,\"error\":\"unknown sequence\"}");
+      return;
+    }
     request->send(200, "application/json", out);
   });
 

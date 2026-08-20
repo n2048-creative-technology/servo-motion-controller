@@ -106,6 +106,18 @@ public:
   // than driving it somewhere the recording never described.
   bool hasYTrack() const { return hasYTrack_; }
 
+  // Appends a downsampled view of a saved sequence to `out` as compact JSON,
+  // for plotting it in the web UI:
+  //   {"name":..,"duration_ms":..,"has_y":..,"points":[[t,x,y,light],...]}
+  //
+  // Reads the file directly and never touches the active buffer, so looking at
+  // one recording can't disturb another that's currently playing. Strided
+  // rather than loaded whole: a full-length recording is thousands of points
+  // and the plot is a few hundred pixels wide, so sending all of them would
+  // cost far more RAM and airtime than the picture is worth. Works on
+  // pre-Y-axis files too (they report has_y false).
+  bool appendPlotJson(const char *name, uint16_t maxPoints, String &out) const;
+
   // Directory listing: fills `out[0..returned)` and returns how many were
   // found (capped at maxCount, and at SEQ_MAX_LISTED regardless).
   uint8_t listSequences(SequenceInfo *out, uint8_t maxCount) const;

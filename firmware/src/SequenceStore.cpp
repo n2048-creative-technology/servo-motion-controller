@@ -261,6 +261,78 @@ uint8_t SequenceStore::clearAll() {
 // batches into a small stack buffer and widen each one, rather than either
 // bloating the RAM budget with a second full-size array or doing one tiny
 // filesystem read per point.
+bool SequenceStore::appendPlotJson(const char *name, uint16_t maxPoints, String &out) const {
+  char safeName[SEQ_NAME_MAX_LEN + 1];
+  if (!sanitizeName(name, safeName, sizeof(safeName))) return false;
+
+  char path[40];
+  pathFor(safeName, path, sizeof(path));
+  File f = LittleFS.open(path, "r");
+  if (!f) return false;
+
+  FileHeader header;
+  if (f.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) != sizeof(header)) {
+    f.close();
+    return false;
+  }
+  if (header.magic != SEQUENCE_FILE_MAGIC || header.version < SEQUENCE_FILE_VERSION_MIN ||
+      header.version > SEQUENCE_FILE_VERSION || header.pointCount == 0) {
+    f.close();
+    return false;
+  }
+
+  const bool hasY = header.version >= SEQUENCE_FILE_VERSION_XY;
+  const size_t recordBytes = hasY ? sizeof(SequencePoint) : SEQUENCE_POINT_BYTES_V1;
+  if (maxPoints == 0) maxPoints = 1;
+  const uint16_t stride =
+      header.pointCount > maxPoints ? ((header.pointCount + maxPoints - 1) / maxPoints) : 1;
+
+  out += "{\"name\":\"";
+  out += safeName;
+  out += "\",\"duration_ms\":";
+  out += header.durationMs;
+  out += ",\"has_y\":";
+  out += hasY ? "true" : "false";
+  out += ",\"points\":[";
+
+  bool first = true;
+  for (uint32_t i = 0; i < header.pointCount; i += stride) {
+    // The final sample is always included, so the plot ends where the
+    // recording does rather than wherever the stride happened to land.
+    const uint32_t index = (i + stride >= header.pointCount) ? (header.pointCount - 1) : i;
+
+    if (!f.seek(sizeof(FileHeader) + index * recordBytes)) break;
+    SequencePoint pt{};
+    if (hasY) {
+      if (f.read(reinterpret_cast<uint8_t *>(&pt), sizeof(pt)) != static_cast<int>(sizeof(pt))) break;
+    } else {
+      SequencePointV1 old{};
+      if (f.read(reinterpret_cast<uint8_t *>(&old), sizeof(old)) != static_cast<int>(sizeof(old))) break;
+      pt.t_ms = old.t_ms;
+      pt.x_decideg = old.angle_decideg;
+      pt.y_decideg = 0;
+      pt.flags = header.version >= 2 ? (old.flags & SEQ_FLAG_RELAY_ON) : 0;
+    }
+
+    if (!first) out += ',';
+    first = false;
+    out += '[';
+    out += pt.t_ms;
+    out += ',';
+    out += String(pt.x_decideg / 10.0f, 1);
+    out += ',';
+    out += String(pt.y_decideg / 10.0f, 1);
+    out += ',';
+    out += (pt.flags & SEQ_FLAG_RELAY_ON) ? '1' : '0';
+    out += ']';
+
+    if (index == header.pointCount - 1) break;
+  }
+  out += "]}";
+  f.close();
+  return true;
+}
+
 bool SequenceStore::readLegacyPoints(File &f, uint16_t pointCount, uint16_t fileVersion) {
   static constexpr uint16_t kBatch = 64;
   SequencePointV1 batch[kBatch];

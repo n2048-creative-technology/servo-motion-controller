@@ -68,6 +68,11 @@ public:
   // pattern or sequence is already looping with zero user interaction.
   void applyAutostart(const PersistedSettings &settings, uint32_t now);
 
+  // How far into the loaded sequence playback currently is, for the web UI's
+  // playhead. Wraps with the loop, and reads 0 whenever a sequence isn't the
+  // thing driving the head.
+  uint32_t sequencePositionMs(uint32_t now) const;
+
   PlaybackMode mode() const { return mode_; }
   const PatternParams &activePatternX() const { return patternX_; }
   const PatternParams &activePatternY() const { return patternY_; }
