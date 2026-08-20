@@ -19,6 +19,25 @@ never drives a locally-attached servo itself.
 - `node`: target Node's id (`0`–`250`). `0` broadcasts to every Node.
 - `angle`: target angle in degrees, clamped by each Node's own servo
   calibration (Settings → Servo Calibration on that board).
+- `relay` *(optional, boolean)*: also switch that Node's relay/light output
+  on D7. **Omit it to leave the light alone** — the Master remembers the last
+  state sent to each target and re-sends that, so a tool that knows nothing
+  about the relay can't switch one off by accident.
+
+Relay state is tracked **per target**, so switching Node 3's light never
+disturbs Node 5's — one button per Node on a gamepad works as you'd expect
+(see `joystick_master_gui.py`). The one thing to watch: `node: 0` (broadcast)
+is its own target entry, so a broadcast command carries *its* relay state to
+every Node at once. Mix broadcast and per-node commands with that in mind —
+if you're controlling lights individually, address Nodes individually.
+
+The relay state travels on the move command rather than in a packet of its
+own so it inherits the angle's resend and ordering guarantees — and so a Node
+recording a Master-driven sequence captures the light exactly in step with
+the motion, which a separate best-effort packet couldn't promise.
+
+To switch a light without moving anything, re-send that Node's current angle
+(from `{"cmd":"list"}`, below) with the new `relay` value.
 
 **List known nodes**
 ```json
@@ -80,7 +99,10 @@ anyway rather than blocking on an unreliable link.
 ## Replies (Master → PC)
 
 - Move command: `{"ok":true}` or `{"ok":false,"error":"..."}`
-- `list`: `{"type":"nodes","nodes":[{"id":3,"angle":120.5,"age_ms":840}, ...]}`
+- `list`: `{"type":"nodes","nodes":[{"id":3,"angle":120.5,"relay":true,"age_ms":840}, ...]}`
+  — `relay` is that Node's *actual* light state, reported in its own
+  heartbeat, so it reflects the light however it was switched (a Master
+  command, the Node's own web UI, or its sequence playback).
 - `remote_record_start`/`remote_record_stop`: `{"ok":true}` once the ESP-NOW
   send itself succeeded — *not* confirmation the Node actually saved
   anything, that's the separate asynchronous `upload_result` below.

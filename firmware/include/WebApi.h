@@ -9,6 +9,7 @@ class PlaybackEngine;
 class SequenceStore;
 class SettingsStore;
 class ServoController;
+class RelayController;
 class NetworkLink;
 class IAngleSink;
 
@@ -17,7 +18,8 @@ class IAngleSink;
 class WebApi {
 public:
   void begin(PlaybackEngine *playback, SequenceStore *sequence, SettingsStore *settingsStore,
-             ServoController *servo, NetworkLink *network, IAngleSink *angleSink, const IPAddress &apIp);
+             ServoController *servo, RelayController *relay, NetworkLink *network, IAngleSink *angleSink,
+             const IPAddress &apIp);
 
   // Call every loop() iteration: services DNS captive-portal requests and
   // throttles the periodic WebSocket status broadcast internally.
@@ -32,6 +34,10 @@ private:
   SequenceStore *sequence_ = nullptr;
   SettingsStore *settingsStore_ = nullptr;
   ServoController *servo_ = nullptr;
+  // The board's physical relay, for the active-low setting only — switching
+  // the light goes through PlaybackEngine, so a Master's toggle reaches its
+  // Nodes instead of its own idle D7 pin.
+  RelayController *relay_ = nullptr;
   NetworkLink *network_ = nullptr;
   IAngleSink *angleSink_ = nullptr;
 

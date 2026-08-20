@@ -2,10 +2,15 @@
 """GUI for sending servo positioning commands to a Master board over USB serial.
 
 Talks the line-based JSON protocol described in ../docs/serial-protocol.md:
-  -> {"node": <0-250>, "angle": <deg>}   move a node (0 = all nodes)
+  -> {"node": <0-250>, "angle": <deg>, "relay": <bool>}
+                                         move a node (0 = all nodes), and
+                                         optionally switch its relay/light
   -> {"cmd": "list"}                     ask for the Master's known-node table
   <- {"ok": true|false, "error": "..."}  ack/error for a move command
-  <- {"type": "nodes", "nodes": [...]}   known-node table
+  <- {"type": "nodes", "nodes": [...]}   known-node table, incl. each node's light
+
+The Master tracks relay state per target, so switching one node's light
+never disturbs another's.
 
 Requires: pyserial (`pip install pyserial`). Tkinter ships with most desktop
 Python installs; on Debian/Ubuntu install `python3-tk` if it's missing.
@@ -68,14 +73,17 @@ class App:
         nodes_frame.pack(fill="both", expand=False, padx=8, pady=(0, 8))
 
         self.node_tree = ttk.Treeview(
-            nodes_frame, columns=("angle", "age"), show="tree headings", height=5, selectmode="extended"
+            nodes_frame, columns=("angle", "light", "age"), show="tree headings", height=5,
+            selectmode="extended",
         )
         self.node_tree.heading("#0", text="Node ID")
-        self.node_tree.column("#0", width=100)
+        self.node_tree.column("#0", width=90)
         self.node_tree.heading("angle", text="Angle")
+        self.node_tree.heading("light", text="Light")
         self.node_tree.heading("age", text="Last seen")
-        self.node_tree.column("angle", width=100, anchor="center")
-        self.node_tree.column("age", width=120, anchor="center")
+        self.node_tree.column("angle", width=90, anchor="center")
+        self.node_tree.column("light", width=60, anchor="center")
+        self.node_tree.column("age", width=110, anchor="center")
         self.node_tree.pack(side="left", fill="x", expand=True)
 
         btns = ttk.Frame(nodes_frame)
@@ -122,6 +130,16 @@ class App:
         ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         ttk.Button(send, text="Send", command=self._send_command).grid(row=2, column=4, sticky="e", pady=(8, 0))
+
+        ttk.Separator(send, orient="horizontal").grid(row=3, column=0, columnspan=5, sticky="ew", pady=8)
+
+        self.light_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            send, text="Light on (relay) — sent with every command below", variable=self.light_var
+        ).grid(row=4, column=0, columnspan=3, sticky="w")
+        ttk.Button(send, text="Apply Light Only", command=self._send_light_only).grid(
+            row=4, column=4, sticky="e"
+        )
 
         log_frame = ttk.LabelFrame(self.root, text="Serial log", padding=8)
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
@@ -215,9 +233,40 @@ class App:
         # A multi-node selection is a client-side fan-out: one JSON line per
         # target, the wire protocol itself only ever addresses one id (or 0
         # for broadcast) per line.
+        relay_on = bool(self.light_var.get())
         for node_id in targets:
             try:
-                line = self.link.send({"node": node_id, "angle": angle})
+                line = self.link.send({"node": node_id, "angle": angle, "relay": relay_on})
+            except (RuntimeError, serial.SerialException, OSError) as exc:
+                messagebox.showerror("Send failed", str(exc))
+                return
+            self._log(f"-> {line.rstrip()}")
+
+    def _send_light_only(self):
+        """Switch the target(s)' light without moving anything.
+
+        The firmware carries relay state on ordinary move commands, so a
+        light-only change is really "re-send where this node already is, with
+        the new light state" — hence each target's own last-reported angle
+        from the heartbeat table, rather than the angle box (which would yank
+        every selected node to one shared position)."""
+        if not self.link.is_open:
+            messagebox.showwarning("Not connected", "Connect to the Master's serial port first.")
+            return
+        try:
+            targets = self._resolve_targets()
+            fallback_angle = float(self.angle_var.get())
+        except (tk.TclError, ValueError):
+            messagebox.showerror("Invalid input", "Node ID and angle must be numbers.")
+            return
+        relay_on = bool(self.light_var.get())
+        for node_id in targets:
+            known = self.nodes.get(node_id, {})
+            # Broadcast (0) is never in the heartbeat table, and a node we
+            # haven't heard from yet isn't either — fall back to the angle box.
+            angle = known.get("angle", fallback_angle)
+            try:
+                line = self.link.send({"node": node_id, "angle": round(angle, 1), "relay": relay_on})
             except (RuntimeError, serial.SerialException, OSError) as exc:
                 messagebox.showerror("Send failed", str(exc))
                 return
@@ -272,7 +321,11 @@ class App:
             age_s = n.get("age_ms", 0) / 1000.0
             self.node_tree.insert(
                 "", "end", iid=str(node_id), text=str(node_id),
-                values=(f"{n.get('angle', 0):.1f}°", f"{age_s:.1f}s ago"),
+                values=(
+                    f"{n.get('angle', 0):.1f}°",
+                    "on" if n.get("relay") else "off",
+                    f"{age_s:.1f}s ago",
+                ),
             )
         # Re-apply the selection across the rebuild (Treeview.delete forgets it).
         still_present = [iid for iid in previously_selected if self.node_tree.exists(iid)]

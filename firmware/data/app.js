@@ -9,7 +9,22 @@
     rise_pct: { label: "Rise (%)", min: 0, max: 100, step: 1, default: 25 },
     hold_pct: { label: "Hold (%)", min: 0, max: 100, step: 1, default: 25 },
     fall_pct: { label: "Fall (%)", min: 0, max: 100, step: 1, default: 25 },
+    interval_min_ms: { label: "Min interval (ms)", min: 100, max: 600000, step: 100, default: 1500 },
+    interval_max_ms: { label: "Max interval (ms)", min: 100, max: 600000, step: 100, default: 6000 },
+    max_speed_dps: { label: "Max speed (\u00b0/s)", min: 5, max: 400, step: 5, default: 90 },
   };
+
+  // Servo travel as calibrated in Settings — the jog fader's range, the
+  // recording trace's vertical scale, and the angle-valued pattern parameters
+  // all follow it, so a servo set up for 180° never shows a 270° control.
+  let servoLimits = { min: 0, max: 270, center: 135 };
+
+  // Must match FIRMWARE_VERSION in firmware/include/Config.h. These two ship
+  // as separate uploads (`pio run -t upload` vs `-t uploadfs`), so one can
+  // silently be older than the other — which looks exactly like "the feature
+  // doesn't work" rather than "half of it isn't on the board". Comparing them
+  // at runtime turns that into a visible banner instead of a hunt.
+  const UI_VERSION = "2.1.0";
 
   let patternCatalog = []; // [{type,label,params:[...]}]
   let ws = null;
@@ -23,6 +38,7 @@
 
   // ---------- tiny helpers ----------
   const $ = (id) => document.getElementById(id);
+  const clamp = (v, lo, hi) => (Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : lo);
 
   async function apiGet(path) {
     const res = await fetch(path);
@@ -71,6 +87,8 @@
   function applyStatus(s) {
     lastStatus = s;
     $("modeLabel").textContent = s.mode;
+    if (s.firmware_version) $("fwVersion").textContent = s.firmware_version;
+    checkVersionMatch(s.firmware_version);
     $("angleLabel").textContent = `${s.angle.toFixed(1)}°`;
 
     const recActive = s.recording && s.recording.active;
@@ -80,7 +98,7 @@
     $("recPoints").textContent = `${s.recording ? s.recording.points : 0} pts`;
 
     if (recActive) {
-      recTrace.push({ t: s.uptime_ms, angle: s.angle });
+      recTrace.push({ t: s.uptime_ms, angle: s.angle, relay: !!s.relay_on });
       if (recTrace.length > 400) recTrace.shift();
       drawTrace();
     } else if (recTrace.length && s.recording && s.recording.points === 0) {
@@ -94,6 +112,44 @@
       $("jogSlider").value = s.angle;
       $("jogValue").textContent = s.angle.toFixed(1);
     }
+
+    // Same for the relay: sequence playback and other clients switch it too.
+    //
+    // Deliberately NOT guarded on document.activeElement the way the jog
+    // slider above is. A checkbox keeps focus after you click it, so that
+    // guard would suppress every later update for the rest of the session —
+    // the switch would sit wherever you last left it and never follow
+    // sequence playback. What it does need is a brief echo window after a
+    // local toggle, so an in-flight status frame sent before the command
+    // landed can't visibly bounce the switch back.
+    if (typeof s.relay_on === "boolean" && Date.now() >= relayEchoUntil) {
+      $("relayToggle").checked = s.relay_on;
+    }
+  }
+
+  // The light gets its own lane along the bottom rather than being drawn into
+  // the angle plot: it's a two-state track, so a solid bar reads instantly
+  // where a second line would just look like a flat trace. The faint wash
+  // above it ties each lit stretch back to the motion it happened during.
+  const TRACE_LANE_H = 14; // px of canvas height reserved for the light lane
+  const TRACE_LANE_GAP = 4;
+
+  function checkVersionMatch(fwVersion) {
+    const banner = $("verWarn");
+    if (!banner) return;
+    // A board that predates the version field at all reports nothing, which is
+    // itself a mismatch worth shouting about.
+    const fw = fwVersion || "older than 2.1.0";
+    if (fwVersion === UI_VERSION) {
+      banner.style.display = "none";
+      return;
+    }
+    banner.style.display = "";
+    banner.innerHTML =
+      `<strong>Firmware / web UI mismatch.</strong> This board runs firmware <code>${fw}</code> ` +
+      `but these web UI files are <code>${UI_VERSION}</code>. They upload separately, so features ` +
+      `that need both (light switch, random pattern) won't work until the firmware is updated too:` +
+      `<br><code>pio run -e &lt;env&gt; -t upload</code> &nbsp;then&nbsp; <code>pio run -e &lt;env&gt; -t uploadfs</code>`;
   }
 
   function drawTrace() {
@@ -105,13 +161,42 @@
     const tMin = recTrace[0].t;
     const tMax = recTrace[recTrace.length - 1].t;
     const tSpan = Math.max(1, tMax - tMin);
+    const laneTop = canvas.height - TRACE_LANE_H;
+    const plotH = laneTop - TRACE_LANE_GAP;
+    const xAt = (p) => ((p.t - tMin) / tSpan) * canvas.width;
 
+    // Empty lane track, so "light never on" still looks deliberate.
+    ctx.fillStyle = "#262b32";
+    ctx.fillRect(0, laneTop, canvas.width, TRACE_LANE_H);
+
+    // Coalesce consecutive lit samples into one bar each. Drawing a rect per
+    // sample instead leaves hairline seams where subpixel edges land, which
+    // reads as a dashed lane rather than a solid one (measured: 8 broken runs
+    // across two lit stretches). Each sample holds its state until the next —
+    // the same step semantics playback uses (SequenceStore::relayAtTime).
+    const n = recTrace.length;
+    let i = 0;
+    while (i < n) {
+      if (!recTrace[i].relay) { i++; continue; }
+      let j = i;
+      while (j + 1 < n && recTrace[j + 1].relay) j++;
+      const x0 = xAt(recTrace[i]);
+      const x1 = xAt(recTrace[Math.min(j + 1, n - 1)]);
+      const w = Math.max(1, x1 - x0);
+      ctx.fillStyle = "#e0a934";
+      ctx.fillRect(x0, laneTop, w, TRACE_LANE_H);
+      ctx.fillStyle = "rgba(224, 169, 52, 0.10)";
+      ctx.fillRect(x0, 0, w, plotH);
+      i = j + 1;
+    }
+
+    const span = Math.max(1, servoLimits.max - servoLimits.min);
     ctx.strokeStyle = "#4da3ff";
     ctx.lineWidth = 2;
     ctx.beginPath();
     recTrace.forEach((p, i) => {
-      const x = ((p.t - tMin) / tSpan) * canvas.width;
-      const y = canvas.height - (p.angle / 270) * canvas.height;
+      const x = xAt(p);
+      const y = plotH - ((p.angle - servoLimits.min) / span) * plotH;
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     });
@@ -138,6 +223,62 @@
       $("jogValue").textContent = v.toFixed(1);
       sendJog(v);
     });
+  }
+
+  // ---------- relay / light ----------
+  // Ignore incoming relay state until this timestamp: covers the round trip
+  // of a toggle we just sent, so the switch doesn't flicker back on a status
+  // frame that was already in flight. Comfortably longer than the ~100ms
+  // status broadcast interval.
+  let relayEchoUntil = 0;
+
+  function sendRelay(on) {
+    relayEchoUntil = Date.now() + 500;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ cmd: "relay", on }));
+    } else {
+      apiPost("/api/relay", { on });
+    }
+  }
+
+  function initRelay() {
+    $("relayToggle").addEventListener("change", () => sendRelay($("relayToggle").checked));
+  }
+
+  // ---------- servo range (jog fader + angle-valued pattern params) ----------
+  function applyServoLimits(servo) {
+    if (!servo) return;
+    const min = Number(servo.min_angle);
+    const max = Number(servo.max_angle);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) return;
+
+    servoLimits = {
+      min,
+      max,
+      center: Number.isFinite(Number(servo.center_angle)) ? Number(servo.center_angle) : (min + max) / 2,
+    };
+
+    const slider = $("jogSlider");
+    slider.min = min;
+    slider.max = max;
+    // A 0.5° step is a sensible resolution for a 270° servo but coarse for a
+    // small range, so scale it to keep roughly the same number of steps.
+    slider.step = (max - min) >= 180 ? 0.5 : 0.1;
+    // Until the first status frame lands, the slider has nothing real to show,
+    // so start it at the configured center rather than at the markup's default
+    // (which is a 270° servo's center and means nothing on a 180° one).
+    slider.value = lastStatus ? clamp(parseFloat(slider.value), min, max) : servoLimits.center;
+    $("jogValue").textContent = parseFloat(slider.value).toFixed(1);
+    $("jogRangeHint").textContent = `Range ${min.toFixed(0)}\u2013${max.toFixed(0)}\u00b0 (from the servo calibration in Settings).`;
+
+    // Keep the pattern forms' angle inputs inside the same travel.
+    PARAM_META.offset_deg.min = min;
+    PARAM_META.offset_deg.max = max;
+    PARAM_META.offset_deg.default = servoLimits.center;
+    PARAM_META.amplitude_deg.max = (max - min) / 2;
+    PARAM_META.amplitude_deg.default = Math.min(45, (max - min) / 2);
+
+    drawTrace();
   }
 
   // ---------- dynamic pattern-param forms ----------
@@ -323,6 +464,12 @@
     $("calMaxAngle").value = s.servo.max_angle;
     $("calCenterAngle").value = s.servo.center_angle;
     $("calInvert").checked = s.servo.invert;
+    applyServoLimits(s.servo);
+
+    if (s.relay) {
+      $("relayActiveLow").checked = !!s.relay.active_low;
+      $("relayPinLabel").textContent = `D7 (GPIO${s.relay.pin})`;
+    }
 
     $("asEnabled").checked = s.autostart.enabled;
     $("asTarget").value = s.autostart.target;
@@ -373,9 +520,12 @@
     if (body) {
       body.innerHTML = knownNodes.length
         ? knownNodes
-            .map((n) => `<tr><td>${n.id}</td><td>${n.angle.toFixed(1)}&deg;</td><td>${(n.age_ms / 1000).toFixed(1)}s ago</td></tr>`)
+            .map(
+              (n) =>
+                `<tr><td>${n.id}</td><td>${n.angle.toFixed(1)}&deg;</td><td>${n.relay ? "on" : "off"}</td><td>${(n.age_ms / 1000).toFixed(1)}s ago</td></tr>`
+            )
             .join("")
-        : '<tr><td colspan="3">no nodes heard from yet</td></tr>';
+        : '<tr><td colspan="4">no nodes heard from yet</td></tr>';
     }
 
     renderTargetChecklist();
@@ -442,9 +592,19 @@
     });
   }
 
-  async function initMasterUi() {
-    const settings = await apiGet("/api/settings");
-    isMaster = settings.network.mode === "master";
+  // One settings fetch at boot: it carries the servo travel the jog fader and
+  // pattern forms need, the relay's polarity/pin, and the Master-only bits.
+  async function initFromSettings() {
+    const settings = await apiGet("/api/settings").catch(() => null);
+    if (!settings) return;
+
+    applyServoLimits(settings.servo);
+    if (settings.relay) {
+      $("relayToggle").checked = !!settings.relay.on;
+      $("relayPinLabel").textContent = `D7 (GPIO${settings.relay.pin})`;
+    }
+
+    isMaster = settings.network && settings.network.mode === "master";
     if (!isMaster) return;
 
     $("targetCard").style.display = "";
@@ -472,16 +632,25 @@
     });
 
     $("calSave").addEventListener("click", () => {
-      apiPost("/api/settings", {
-        servo: {
-          min_us: parseInt($("calMinUs").value, 10),
-          max_us: parseInt($("calMaxUs").value, 10),
-          min_angle: parseFloat($("calMinAngle").value),
-          max_angle: parseFloat($("calMaxAngle").value),
-          center_angle: parseFloat($("calCenterAngle").value),
-          invert: $("calInvert").checked,
-        },
+      const servo = {
+        min_us: parseInt($("calMinUs").value, 10),
+        max_us: parseInt($("calMaxUs").value, 10),
+        min_angle: parseFloat($("calMinAngle").value),
+        max_angle: parseFloat($("calMaxAngle").value),
+        center_angle: parseFloat($("calCenterAngle").value),
+        invert: $("calInvert").checked,
+      };
+      apiPost("/api/settings", { servo }).then(() => {
+        // Re-range the jog fader and the pattern forms right away rather than
+        // leaving them on the old travel until the next page load.
+        applyServoLimits(servo);
+        onPatternTypeChange();
+        onAsPatternTypeChange();
       });
+    });
+
+    $("relaySave").addEventListener("click", () => {
+      apiPost("/api/settings", { relay: { active_low: $("relayActiveLow").checked } });
     });
 
     $("asSave").addEventListener("click", () => {
@@ -523,14 +692,17 @@
   async function init() {
     initTabs();
     initJog();
+    initRelay();
     initPatternControls();
     initRecordControls();
     initSettingsControls();
     initTargetControls();
     connectWs();
+    // Settings first: the pattern forms built by loadPatterns() take their
+    // angle bounds from the servo travel it reports.
+    await initFromSettings();
     await loadPatterns();
     await refreshSequenceList();
-    await initMasterUi();
   }
 
   document.addEventListener("DOMContentLoaded", init);

@@ -14,10 +14,16 @@ Lets you:
     (controller 2, axis 4) -> Node 1 coexist freely.
   - Stream live axis movement from every mapped controller to its linked
     Node(s) at once, once mapped.
-  - Record the computed angle for every mapped Node to a CSV file (which
-    controller/axis produced it is irrelevant to playback — only Node ID +
-    angle are recorded), and replay that CSV later to reproduce the same
-    motion without any physical controller connected at all.
+  - "Learn" a button the same way and link it to a Node's relay/light, so a
+    button press toggles that one Node's light (or holds it on while held,
+    if you pick momentary). Each Node's light is switched independently —
+    the Master tracks relay state per target, so Node 3's button never
+    disturbs Node 5's light.
+  - Record the computed angle *and* the light state for every mapped Node to
+    a CSV file (which controller/axis/button produced it is irrelevant to
+    playback — only Node ID + angle + light are recorded), and replay that
+    CSV later to reproduce the same motion and lighting without any physical
+    controller connected at all.
 
 Requires: pyserial, pygame (`pip install -r requirements.txt`). Tkinter
 ships with most desktop Python installs; on Debian/Ubuntu install
@@ -44,6 +50,13 @@ LEARN_DURATION_MS = 4000
 LEARN_POLL_INTERVAL_MS = 30
 MIN_LEARN_RANGE = 0.15  # raw axis units; below this, "no clear movement" wins
 ANGLE_SEND_EPSILON = 0.2  # degrees; skip a resend below this delta
+
+# A Node's light needs an angle to travel with (the firmware carries relay
+# state on ordinary move commands — see ../docs/serial-protocol.md), so a
+# light-only change re-sends the Node's last known angle. This is the
+# fallback when we've never seen one: the firmware clamps it to that Node's
+# own calibration anyway.
+DEFAULT_HOLD_ANGLE = 135.0
 DEFAULT_ANGLE_MIN = 0.0
 DEFAULT_ANGLE_MAX = 270.0
 MAX_LOG_LINES = 500
@@ -167,6 +180,7 @@ class AxisMapping:
 
     def to_dict(self):
         return {
+            "kind": "axis",
             "controller_guid": self.controller_guid,
             "controller_name": self.controller_name,
             "axis_index": self.axis_index,
@@ -193,6 +207,66 @@ class AxisMapping:
         )
 
 
+class ButtonMapping:
+    """One learned (controller, button) -> Node relay/light link.
+
+    Two behaviours, because both are useful for a light:
+      - "toggle" (default): each press flips that Node's light. What a wall
+        switch does, and what you want for a light left on across a take.
+      - "momentary": light follows the button — on while held, off on
+        release. For flashes/strobing by hand.
+
+    Node targeting is per-Node by design: the Master keeps relay state
+    separately for each target, so one button switching Node 3's light
+    leaves every other Node's alone (see NetworkLink::sendCommand in the
+    firmware)."""
+
+    def __init__(self, controller_guid, controller_name, button_index, node_id, mode="toggle"):
+        self.controller_guid = controller_guid
+        self.controller_name = controller_name
+        self.button_index = button_index
+        self.node_id = node_id
+        self.mode = mode if mode in ("toggle", "momentary") else "toggle"
+        self.was_pressed = False  # edge detection state, not persisted
+
+    def next_state(self, pressed, current):
+        """The light state this button wants, given whether it's held right
+        now and what the light is currently doing. Edge detection lives here
+        (not in the caller's tick loop) so it's exercisable on its own."""
+        if self.mode == "momentary":
+            new_state = pressed
+        elif pressed and not self.was_pressed:
+            new_state = not current  # toggle on the press edge only, not while held
+        else:
+            new_state = current
+        self.was_pressed = pressed
+        return new_state
+
+    def label(self):
+        controller = self.controller_name or "unknown controller"
+        return f"{controller} button {self.button_index} -> Node {self.node_id} light [{self.mode}]"
+
+    def to_dict(self):
+        return {
+            "kind": "button",
+            "controller_guid": self.controller_guid,
+            "controller_name": self.controller_name,
+            "button_index": self.button_index,
+            "node_id": self.node_id,
+            "mode": self.mode,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            controller_guid=d.get("controller_guid"),
+            controller_name=d.get("controller_name"),
+            button_index=int(d["button_index"]),
+            node_id=int(d["node_id"]),
+            mode=d.get("mode", "toggle"),
+        )
+
+
 def save_mapping_config(path, mappings):
     """Save learned mappings (each carrying its own controller identity) so
     they survive a restart without re-learning."""
@@ -210,7 +284,12 @@ def load_mapping_config(path):
     with open(path) as f:
         data = json.load(f)
     legacy_name = data.get("controller_name")
-    mappings = [AxisMapping.from_dict(d) for d in data.get("mappings", [])]
+    mappings = [
+        # No "kind" at all means a mapping file written before button/light
+        # mappings existed — those were all axis mappings.
+        ButtonMapping.from_dict(d) if d.get("kind") == "button" else AxisMapping.from_dict(d)
+        for d in data.get("mappings", [])
+    ]
     if legacy_name:
         for m in mappings:
             if m.controller_guid is None and m.controller_name is None:
@@ -218,28 +297,75 @@ def load_mapping_config(path):
     return mappings
 
 
+# Recorded rows are (t_ms, {node_id: angle}, {node_id: light_bool}). The two
+# dicts are kept separate rather than merged into one per-node record because
+# a Node can legitimately have one without the other: an axis mapped but no
+# button (motion, no light track) or a button but no axis (a light-only Node).
+CSV_LIGHT_SUFFIX = "_light"
+
+
 def load_csv_rows(path):
-    """Parse a recorded CSV back into [(t_ms, {node_id: angle}), ...]."""
+    """Parse a recorded CSV back into [(t_ms, {node_id: angle}, {node_id: light}), ...].
+
+    Reads both the current format (a `node_N` angle column plus an optional
+    `node_N_light` column per Node) and the older angle-only files written
+    before lights existed — those load with every light off."""
     with open(path, newline="") as f:
         reader = csv.reader(f)
         header = next(reader)
-        node_ids = [int(col.split("_", 1)[1]) for col in header[1:]]
+        angle_cols = {}  # column index -> node id
+        light_cols = {}
+        for idx, col in enumerate(header[1:], start=1):
+            if not col.startswith("node_"):
+                continue
+            rest = col[len("node_"):]
+            if rest.endswith(CSV_LIGHT_SUFFIX):
+                light_cols[idx] = int(rest[: -len(CSV_LIGHT_SUFFIX)])
+            else:
+                angle_cols[idx] = int(rest)
         rows = []
         for row in reader:
             t_ms = int(float(row[0]))
-            sample = {nid: float(val) for nid, val in zip(node_ids, row[1:]) if val != ""}
-            rows.append((t_ms, sample))
+            angles = {
+                nid: float(row[i]) for i, nid in angle_cols.items() if i < len(row) and row[i] != ""
+            }
+            lights = {
+                nid: row[i].strip().lower() in ("1", "true", "on")
+                for i, nid in light_cols.items()
+                if i < len(row) and row[i] != ""
+            }
+            rows.append((t_ms, angles, lights))
     return rows
 
 
 def save_csv_rows(path, rows):
-    """Write [(t_ms, {node_id: angle}), ...] out in the same shape load_csv_rows reads."""
-    node_ids = sorted({nid for _, sample in rows for nid in sample})
+    """Write [(t_ms, angles, lights), ...] in the shape load_csv_rows reads.
+
+    A Node's `node_N_light` column is only emitted if that Node actually has
+    light data, so a recording made without any button mapping produces the
+    same angle-only file it always did."""
+    angle_ids = sorted({nid for _, angles, _ in rows for nid in angles})
+    light_ids = sorted({nid for _, _, lights in rows for nid in lights})
+    columns = []  # (node_id, is_light), ordered by node then angle-before-light
+    for nid in sorted(set(angle_ids) | set(light_ids)):
+        if nid in angle_ids:
+            columns.append((nid, False))
+        if nid in light_ids:
+            columns.append((nid, True))
+
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["t_ms"] + [f"node_{nid}" for nid in node_ids])
-        for t_ms, sample in rows:
-            writer.writerow([t_ms] + [f"{sample[nid]:.1f}" if nid in sample else "" for nid in node_ids])
+        writer.writerow(
+            ["t_ms"] + [f"node_{nid}{CSV_LIGHT_SUFFIX if is_light else ''}" for nid, is_light in columns]
+        )
+        for t_ms, angles, lights in rows:
+            out = [t_ms]
+            for nid, is_light in columns:
+                if is_light:
+                    out.append("1" if lights.get(nid) else "0" if nid in lights else "")
+                else:
+                    out.append(f"{angles[nid]:.1f}" if nid in angles else "")
+            writer.writerow(out)
 
 
 def _interp_channel(times, values, src_t):
@@ -260,8 +386,21 @@ def _interp_channel(times, values, src_t):
     return values[i - 1] + frac * (values[i] - values[i - 1])
 
 
+def _light_at(times, values, src_t):
+    """A light's state at src_t: held from the most recent sample at or before
+    it (a relay is on or off — interpolating between the two would mean
+    chattering it at the sample rate). Mirrors the firmware's
+    SequenceStore::relayAtTime."""
+    if not times:
+        return None
+    if src_t <= times[0]:
+        return values[0]
+    i = bisect.bisect_right(times, src_t) - 1
+    return values[max(0, i)]
+
+
 def resample_rows(rows, output_interval_ms, speed):
-    """Resample recorded (t_ms, {node_id: angle}) rows onto a fixed-cadence
+    """Resample recorded (t_ms, {node_id: angle}, {node_id: light}) rows onto a fixed-cadence
     output grid, so the actual send rate during playback stays close to
     `output_interval_ms` regardless of speed instead of just stretching or
     compressing the gaps between the original samples:
@@ -280,44 +419,64 @@ def resample_rows(rows, output_interval_ms, speed):
     if not rows:
         return []
 
-    node_ids = sorted({nid for _, sample in rows for nid in sample})
-    timelines = {}
-    for nid in node_ids:
-        pts = [(t, s[nid]) for t, s in rows if nid in s]
-        timelines[nid] = ([p[0] for p in pts], [p[1] for p in pts])
+    angle_ids = sorted({nid for _, angles, _ in rows for nid in angles})
+    light_ids = sorted({nid for _, _, lights in rows for nid in lights})
+
+    angle_timelines = {}
+    for nid in angle_ids:
+        pts = [(t, a[nid]) for t, a, _ in rows if nid in a]
+        angle_timelines[nid] = ([p[0] for p in pts], [p[1] for p in pts])
+
+    light_timelines = {}
+    for nid in light_ids:
+        pts = [(t, l[nid]) for t, _, l in rows if nid in l]
+        light_timelines[nid] = ([p[0] for p in pts], [p[1] for p in pts])
 
     duration_ms = rows[-1][0]
     output_duration_ms = max(0, int(duration_ms / speed))
 
     def sample_at(src_t):
-        out = {}
-        for nid in node_ids:
-            times, values = timelines[nid]
+        angles = {}
+        for nid in angle_ids:
+            times, values = angle_timelines[nid]
             v = _interp_channel(times, values, src_t)
             if v is not None:
-                out[nid] = v
-        return out
+                angles[nid] = v
+        lights = {}
+        for nid in light_ids:
+            times, values = light_timelines[nid]
+            v = _light_at(times, values, src_t)
+            if v is not None:
+                lights[nid] = v
+        return angles, lights
 
     out_rows = []
     out_t = 0
     while out_t < output_duration_ms:
-        out_rows.append((out_t, sample_at(out_t * speed)))
+        angles, lights = sample_at(out_t * speed)
+        out_rows.append((out_t, angles, lights))
         out_t += output_interval_ms
-    out_rows.append((output_duration_ms, sample_at(duration_ms)))  # exact final position, always
+    angles, lights = sample_at(duration_ms)
+    out_rows.append((output_duration_ms, angles, lights))  # exact final position, always
     return out_rows
 
 
 class LearnDialog(tk.Toplevel):
-    """Phase 1: watch every axis of every currently-connected controller for
-    a few seconds, pick whichever (controller, axis) pair moved most — so
-    with several controllers plugged in, you just move the stick you want to
-    link and it's identified automatically, no need to pick a controller
-    first. Phase 2: assign that winner to a Node + angle range, reusing the
-    same window."""
+    """Phase 1: watch every axis *and* button of every currently-connected
+    controller for a few seconds, and pick whichever one you actually used —
+    so with several controllers plugged in, you just move the stick (or press
+    the button) you want to link and it's identified automatically, no need
+    to pick a controller first. Phase 2: assign that winner to a Node,
+    reusing the same window: an axis gets an angle range, a button gets that
+    Node's light.
+
+    A button press wins over any axis movement in the same window: axes idle
+    with noise and drift, so "a button went down" is the unambiguous signal
+    of intent, whereas a big axis span could just be a stick being released."""
 
     def __init__(self, parent, controllers, known_nodes_provider, on_saved):
         super().__init__(parent)
-        self.title("Learn axis")
+        self.title("Learn axis or button")
         self.resizable(False, False)
         self.controllers = controllers  # [(guid, name, Joystick), ...] snapshot
         self.known_nodes_provider = known_nodes_provider
@@ -328,10 +487,13 @@ class LearnDialog(tk.Toplevel):
             for i in range(js.get_numaxes()):
                 self.mins[(guid, i)] = float("inf")
                 self.maxs[(guid, i)] = float("-inf")
+        self.pressed_button = None  # (guid, button_index) of the first button seen going down
         self.elapsed_ms = 0
 
         watching = ", ".join(name for _g, name, _j in self.controllers) or "no controllers connected"
-        self.status_var = tk.StringVar(value=f"Move the axis you want to link now… (watching: {watching})")
+        self.status_var = tk.StringVar(
+            value=f"Move the axis, or press the button, you want to link now… (watching: {watching})"
+        )
         ttk.Label(self, textvariable=self.status_var, padding=12, wraplength=320).pack()
         self.progress = ttk.Progressbar(self, maximum=LEARN_DURATION_MS, length=280)
         self.progress.pack(padx=12, pady=(0, 12))
@@ -355,24 +517,42 @@ class LearnDialog(tk.Toplevel):
                         self.mins[key] = v
                     if v > self.maxs[key]:
                         self.maxs[key] = v
+                if self.pressed_button is None:
+                    for b in range(js.get_numbuttons()):
+                        if js.get_button(b):
+                            self.pressed_button = (guid, b)
+                            break
             except pygame.error:
                 continue  # that controller was unplugged mid-learn; skip it this tick
         self.elapsed_ms += LEARN_POLL_INTERVAL_MS
         self.progress["value"] = min(self.elapsed_ms, LEARN_DURATION_MS)
-        if self.elapsed_ms < LEARN_DURATION_MS:
+        # A pressed button is unambiguous, so don't make the user wait out the
+        # rest of the window for it.
+        if self.pressed_button is not None:
+            self._finish_learn()
+        elif self.elapsed_ms < LEARN_DURATION_MS:
             self.after(LEARN_POLL_INTERVAL_MS, self._poll)
         else:
             self._finish_learn()
 
     def _finish_learn(self):
+        if self.pressed_button is not None:
+            guid, button_index = self.pressed_button
+            controller_name = next(
+                (name for g, name, _js in self.controllers if g == guid), "unknown controller"
+            )
+            self._show_button_form(guid, controller_name, button_index)
+            return
+
         spans = [(self.maxs[k] - self.mins[k], k) for k in self.mins]
         spans.sort(reverse=True)
         best_span, best_key = spans[0] if spans else (0.0, None)
         if best_key is None or best_span < MIN_LEARN_RANGE:
             messagebox.showwarning(
-                "No clear movement",
-                "Didn't detect a clear axis movement. Try again and move one axis (on any connected "
-                "controller) through its full range.",
+                "No clear input",
+                "Didn't detect a clear axis movement or button press. Try again and either move one "
+                "axis (on any connected controller) through its full range, or press the button you "
+                "want to link.",
                 parent=self,
             )
             self.destroy()
@@ -380,6 +560,105 @@ class LearnDialog(tk.Toplevel):
         guid, axis_index = best_key
         controller_name = next((name for g, name, _js in self.controllers if g == guid), "unknown controller")
         self._show_assign_form(guid, controller_name, axis_index, self.mins[best_key], self.maxs[best_key])
+
+    def _build_node_picker(self, form):
+        """Node ID combobox + Refresh, filled from the Master's known-node
+        table. Returns a resolver that yields the chosen id (or None, having
+        already shown the error, if what's typed isn't usable) — shared by
+        the axis and button assign forms."""
+        ttk.Label(form, text="Node ID:").grid(row=0, column=0, sticky="w")
+        node_var = tk.StringVar()
+        node_combo = ttk.Combobox(form, textvariable=node_var, width=26)
+        node_combo.grid(row=0, column=1, sticky="w", padx=(4, 0))
+        node_display_to_id = {}
+        known_hint_var = tk.StringVar(value="")
+
+        def refresh_known_nodes():
+            nonlocal node_display_to_id
+            known = self.known_nodes_provider()
+            node_display_to_id = {}
+            values = []
+            for nid in sorted(known):
+                n = known[nid]
+                age_s = n.get("age_ms", 0) / 1000.0
+                light = "light on" if n.get("relay") else "light off"
+                display = f"{nid} ({n.get('angle', 0):.1f}°, {light}, {age_s:.1f}s ago)"
+                node_display_to_id[display] = nid
+                values.append(display)
+            node_combo["values"] = values
+            if values and not node_var.get():
+                node_var.set(values[0])
+            known_hint_var.set(f"{len(values)} known node(s)" if values else "no nodes heard from yet — type an ID")
+
+        ttk.Button(form, text="Refresh", command=refresh_known_nodes, width=8).grid(
+            row=0, column=2, sticky="w", padx=(4, 0)
+        )
+        ttk.Label(form, textvariable=known_hint_var, foreground="#666").grid(
+            row=1, column=0, columnspan=3, sticky="w", pady=(2, 6)
+        )
+        refresh_known_nodes()
+
+        def resolve():
+            raw_node = node_var.get().strip()
+            node_id = node_display_to_id.get(raw_node)
+            if node_id is None:
+                try:
+                    node_id = int(raw_node.split()[0])
+                except (ValueError, IndexError):
+                    messagebox.showerror(
+                        "Invalid input", "Pick a known node or type a Node ID (0-250).", parent=self
+                    )
+                    return None
+            if not (0 <= node_id <= 250):
+                messagebox.showerror("Invalid input", "Node ID must be 0-250.", parent=self)
+                return None
+            return node_id
+
+        return resolve
+
+    def _show_button_form(self, controller_guid, controller_name, button_index):
+        for child in self.winfo_children():
+            child.destroy()
+
+        ttk.Label(
+            self,
+            text=f"Detected {controller_name} button {button_index} — link it to a Node's light",
+            padding=(12, 12, 12, 4),
+            wraplength=320,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        form = ttk.Frame(self, padding=12)
+        form.grid(row=1, column=0, columnspan=2, sticky="ew")
+
+        resolve_node_id = self._build_node_picker(form)
+
+        mode_var = tk.StringVar(value="toggle")
+        ttk.Radiobutton(
+            form, text="Toggle: each press flips the light", variable=mode_var, value="toggle"
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(
+            form, text="Momentary: light on only while held", variable=mode_var, value="momentary"
+        ).grid(row=3, column=0, columnspan=3, sticky="w")
+
+        def save():
+            node_id = resolve_node_id()
+            if node_id is None:
+                return
+            self.on_saved(
+                ButtonMapping(
+                    controller_guid=controller_guid,
+                    controller_name=controller_name,
+                    button_index=button_index,
+                    node_id=node_id,
+                    mode=mode_var.get(),
+                )
+            )
+            self.destroy()
+
+        btns = ttk.Frame(self, padding=(12, 0, 12, 12))
+        btns.grid(row=2, column=0, columnspan=2, sticky="e")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Save Mapping", command=save).pack(side="left")
 
     def _show_assign_form(self, controller_guid, controller_name, axis_index, raw_min, raw_max):
         for child in self.winfo_children():
@@ -395,34 +674,7 @@ class LearnDialog(tk.Toplevel):
         form = ttk.Frame(self, padding=12)
         form.grid(row=1, column=0, columnspan=2, sticky="ew")
 
-        ttk.Label(form, text="Node ID:").grid(row=0, column=0, sticky="w")
-        node_var = tk.StringVar()
-        node_combo = ttk.Combobox(form, textvariable=node_var, width=26)
-        node_combo.grid(row=0, column=1, sticky="w", padx=(4, 0))
-        node_display_to_id = {}
-
-        def refresh_known_nodes():
-            nonlocal node_display_to_id
-            known = self.known_nodes_provider()
-            node_display_to_id = {}
-            values = []
-            for nid in sorted(known):
-                n = known[nid]
-                age_s = n.get("age_ms", 0) / 1000.0
-                display = f"{nid} ({n.get('angle', 0):.1f}°, {age_s:.1f}s ago)"
-                node_display_to_id[display] = nid
-                values.append(display)
-            node_combo["values"] = values
-            if values and not node_var.get():
-                node_var.set(values[0])
-            known_hint_var.set(f"{len(values)} known node(s)" if values else "no nodes heard from yet — type an ID")
-
-        known_hint_var = tk.StringVar(value="")
-        ttk.Button(form, text="Refresh", command=refresh_known_nodes, width=8).grid(row=0, column=2, sticky="w", padx=(4, 0))
-        ttk.Label(form, textvariable=known_hint_var, foreground="#666").grid(
-            row=1, column=0, columnspan=3, sticky="w", pady=(2, 6)
-        )
-        refresh_known_nodes()
+        resolve_node_id = self._build_node_picker(form)
 
         ttk.Label(form, text="Angle min (°):").grid(row=2, column=0, sticky="w", pady=(6, 0))
         angle_min_var = tk.DoubleVar(value=DEFAULT_ANGLE_MIN)
@@ -438,24 +690,14 @@ class LearnDialog(tk.Toplevel):
         )
 
         def save():
-            raw_node = node_var.get().strip()
-            node_id = node_display_to_id.get(raw_node)
+            node_id = resolve_node_id()
             if node_id is None:
-                try:
-                    node_id = int(raw_node.split()[0])
-                except (ValueError, IndexError):
-                    messagebox.showerror(
-                        "Invalid input", "Pick a known node or type a Node ID (0-250).", parent=self
-                    )
-                    return
+                return
             try:
                 angle_min = float(angle_min_var.get())
                 angle_max = float(angle_max_var.get())
             except (tk.TclError, ValueError):
                 messagebox.showerror("Invalid input", "Angle range must be numbers.", parent=self)
-                return
-            if not (0 <= node_id <= 250):
-                messagebox.showerror("Invalid input", "Node ID must be 0-250.", parent=self)
                 return
             mapping = AxisMapping(
                 controller_guid=controller_guid,
@@ -551,7 +793,10 @@ class UploadDialog(tk.Toplevel):
 
     def _refresh_node_choices(self):
         rows = self._current_rows()
-        node_ids = sorted({nid for _, sample in rows for nid in sample})
+        node_ids = sorted(
+            {nid for _, angles, _ in rows for nid in angles}
+            | {nid for _, _, lights in rows for nid in lights}
+        )
         self.node_combo["values"] = [str(n) for n in node_ids]
         if node_ids and not self.node_var.get():
             self.node_var.set(str(node_ids[0]))
@@ -566,8 +811,11 @@ class UploadDialog(tk.Toplevel):
             )
         else:
             target_desc = " Only the selected Node's own column is sent — the others are never transmitted to it." if node_ids else ""
+        light_ids = sorted({nid for _, _, lights in rows for nid in lights})
+        light_desc = f" Light track included for Node(s) {', '.join(str(n) for n in light_ids)}." if light_ids else ""
         self.hint_var.set(
             f"{duration_s:.1f}s of motion."
+            + light_desc
             + target_desc
             + (f" Longer than the {UPLOAD_MAX_DURATION_MS/1000:.0f}s a Node can hold; it'll be truncated."
                if over else "")
@@ -580,7 +828,10 @@ class UploadDialog(tk.Toplevel):
             return
 
         if self.all_nodes_var.get():
-            node_ids = sorted({nid for _, sample in rows for nid in sample})
+            node_ids = sorted(
+                {nid for _, angles, _ in rows for nid in angles}
+                | {nid for _, _, lights in rows for nid in lights}
+            )
             if not node_ids:
                 messagebox.showerror("No Nodes", "No Node data found in the selected source.", parent=self)
                 return
@@ -621,6 +872,12 @@ class App:
         self.known_nodes = {}  # node_id -> {"angle":..., "age_ms":...}, from the Master's heartbeat table
         self._node_poll_job = None
         self._tick_job = None
+
+        # node_id -> current light state as this tool believes it. The Master
+        # tracks it per target too (see NetworkLink::lastRelayFor), so these
+        # stay in step as long as nothing else is switching the same Node.
+        self.relay_state = {}
+        self.last_angle_sent = {}  # node_id -> last angle commanded, for light-only changes
 
         self.recording = False
         self.record_start_ms = None
@@ -674,7 +931,7 @@ class App:
             row=1, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
-        mapframe = ttk.LabelFrame(self.root, text="Axis -> Node mappings", padding=8)
+        mapframe = ttk.LabelFrame(self.root, text="Axis / button -> Node mappings", padding=8)
         mapframe.pack(fill="both", expand=False, padx=8, pady=(0, 8))
 
         self.map_tree = ttk.Treeview(mapframe, columns=("mapping",), show="headings", height=5)
@@ -684,7 +941,7 @@ class App:
 
         map_btns = ttk.Frame(mapframe)
         map_btns.pack(side="left", padx=(8, 0))
-        self.learn_btn = ttk.Button(map_btns, text="Learn New Mapping", command=self._start_learn)
+        self.learn_btn = ttk.Button(map_btns, text="Learn Axis / Button…", command=self._start_learn)
         self.learn_btn.pack(fill="x")
         ttk.Button(map_btns, text="Remove Selected", command=self._remove_selected_mapping).pack(fill="x", pady=(4, 0))
         ttk.Button(map_btns, text="Remove All", command=self._remove_all_mappings).pack(fill="x", pady=(4, 0))
@@ -697,15 +954,15 @@ class App:
         self.streaming_var = tk.BooleanVar(value=False)
         self.stream_check = ttk.Checkbutton(
             stream,
-            text="Start streaming mapped axes to their Nodes (~25 Hz)",
+            text="Start streaming mapped axes/buttons to their Nodes (~25 Hz)",
             variable=self.streaming_var,
             state="disabled",
         )
         self.stream_check.pack(side="left")
-        self.stream_hint_var = tk.StringVar(value="learn at least one axis -> Node mapping to enable")
+        self.stream_hint_var = tk.StringVar(value="learn at least one axis/button -> Node mapping to enable")
         ttk.Label(stream, textvariable=self.stream_hint_var, foreground="#666").pack(side="left", padx=(10, 0))
 
-        rec = ttk.LabelFrame(self.root, text="Recording / Playback (CSV)", padding=8)
+        rec = ttk.LabelFrame(self.root, text="Recording / Playback (CSV — angles + lights)", padding=8)
         rec.pack(fill="x", padx=8, pady=(0, 8))
         self.record_btn = ttk.Button(rec, text="Start Recording", command=self._toggle_recording)
         self.record_btn.grid(row=0, column=0, sticky="w")
@@ -871,8 +1128,7 @@ class App:
             old_guid = mapping.controller_guid
             mapping.controller_guid = candidates[0]
             self._log(
-                f"-- auto-bound mapping ({mapping.controller_name} axis {mapping.axis_index} -> "
-                f"Node {mapping.node_id}) to connected controller (was {old_guid}) --"
+                f"-- auto-bound mapping ({mapping.label()}) to connected controller (was {old_guid}) --"
             )
 
     def _mapping_label(self, mapping):
@@ -951,6 +1207,22 @@ class App:
                 "mapping while its controller is offline.",
             )
 
+    def _axis_mappings(self):
+        return [m for m in self.mappings if isinstance(m, AxisMapping)]
+
+    def _button_mappings(self):
+        return [m for m in self.mappings if isinstance(m, ButtonMapping)]
+
+    def _send_node(self, node_id, angle, relay_on):
+        """One move command carrying both the angle and that Node's light.
+
+        Always sends both together: the firmware carries relay state on move
+        commands, so this is also what keeps a Node's light from being reset
+        by an angle-only command (see ../docs/serial-protocol.md)."""
+        line = self.link.send({"node": node_id, "angle": round(angle, 1), "relay": bool(relay_on)})
+        self.last_angle_sent[node_id] = angle
+        return line
+
     def _update_streaming_availability(self):
         if self.mappings:
             self.stream_check.configure(state="normal")
@@ -958,7 +1230,7 @@ class App:
         else:
             self.streaming_var.set(False)
             self.stream_check.configure(state="disabled")
-            self.stream_hint_var.set("learn at least one axis -> Node mapping to enable")
+            self.stream_hint_var.set("learn at least one axis/button -> Node mapping to enable")
 
     # ---------- main tick: display + streaming + recording ----------
     def _tick(self):
@@ -982,8 +1254,42 @@ class App:
 
             if self.mappings:
                 now_ms = int(time.monotonic() * 1000)
+                streaming = self.streaming_var.get() and self.link.is_open
+
+                # Buttons first, so a light switched on this tick is already
+                # reflected in the move commands (and the recording) below.
+                lights = {}
+                for m in self._button_mappings():
+                    js = self.joysticks.get(m.controller_guid)
+                    if js is None:
+                        lights[m.node_id] = self.relay_state.get(m.node_id, False)
+                        continue
+                    try:
+                        pressed = bool(js.get_button(m.button_index))
+                    except pygame.error:
+                        lights[m.node_id] = self.relay_state.get(m.node_id, False)
+                        continue
+
+                    current = self.relay_state.get(m.node_id, False)
+                    desired = m.next_state(pressed, current)
+                    changed = desired != current
+                    self.relay_state[m.node_id] = desired
+                    lights[m.node_id] = desired
+
+                    # A light change has to travel on a move command, so send
+                    # one immediately at the Node's last commanded angle
+                    # rather than waiting for its axis to move again — a
+                    # light-only Node may have no axis mapping at all.
+                    if changed and streaming:
+                        angle = self.last_angle_sent.get(m.node_id, DEFAULT_HOLD_ANGLE)
+                        try:
+                            line = self._send_node(m.node_id, angle, desired)
+                            self._log(f"-> {line.rstrip()}")
+                        except (RuntimeError, serial.SerialException, OSError) as exc:
+                            self._log(f"-- light send failed: {exc} --")
+
                 sample = {}
-                for m in self.mappings:
+                for m in self._axis_mappings():
                     js = self.joysticks.get(m.controller_guid)
                     if js is None:
                         continue  # that mapping's controller isn't connected right now; skip it
@@ -993,17 +1299,19 @@ class App:
                         continue
                     angle = m.compute_angle(raw)
                     sample[m.node_id] = angle
-                    if self.streaming_var.get() and self.link.is_open:
+                    if streaming:
                         if m.last_sent_angle is None or abs(angle - m.last_sent_angle) >= ANGLE_SEND_EPSILON:
                             m.last_sent_angle = angle
                             try:
-                                line = self.link.send({"node": m.node_id, "angle": round(angle, 1)})
+                                line = self._send_node(
+                                    m.node_id, angle, self.relay_state.get(m.node_id, False)
+                                )
                                 self._log(f"-> {line.rstrip()}")
                             except (RuntimeError, serial.SerialException, OSError) as exc:
                                 self._log(f"-- send failed: {exc} --")
                 if self.recording:
                     elapsed = now_ms - self.record_start_ms
-                    self.record_buffer.append((elapsed, sample))
+                    self.record_buffer.append((elapsed, sample, dict(lights)))
                     self.record_status_var.set(f"recording… {len(self.record_buffer)} samples")
 
         self._tick_job = self.root.after(TICK_INTERVAL_MS, self._tick)
@@ -1016,7 +1324,7 @@ class App:
             self.record_status_var.set(f"stopped — {len(self.record_buffer)} samples captured")
         else:
             if not self.mappings:
-                messagebox.showwarning("No mappings", "Learn at least one axis mapping first.")
+                messagebox.showwarning("No mappings", "Learn at least one axis or button mapping first.")
                 return
             self.record_buffer = []
             self.record_start_ms = int(time.monotonic() * 1000)
@@ -1087,15 +1395,23 @@ class App:
     def _send_playback_row(self):
         if self.playback_index >= len(self._playback_plan):
             return
-        t_ms, sample = self._playback_plan[self.playback_index]
-        for node_id, angle in sample.items():
+        t_ms, sample, lights = self._playback_plan[self.playback_index]
+        # A Node with a recorded light track but no recorded motion still
+        # needs a command to carry that light, so it gets its last commanded
+        # angle (or the default hold angle) instead of being skipped.
+        node_ids = sorted(set(sample) | set(lights))
+        for node_id in node_ids:
+            angle = sample.get(node_id, self.last_angle_sent.get(node_id, DEFAULT_HOLD_ANGLE))
+            relay_on = lights.get(node_id, self.relay_state.get(node_id, False))
             try:
-                line = self.link.send({"node": node_id, "angle": round(angle, 1)})
+                line = self._send_node(node_id, angle, relay_on)
                 self._log(f"-> {line.rstrip()}")
             except (RuntimeError, serial.SerialException, OSError) as exc:
                 self._log(f"-- playback send failed: {exc} --")
                 self._stop_playback()
                 return
+            if node_id in lights:
+                self.relay_state[node_id] = relay_on
 
         next_index = self.playback_index + 1
         if next_index < len(self._playback_plan):
@@ -1204,26 +1520,43 @@ class App:
         )
 
     def _begin_upload(self, rows, node_id, name, clear_first=False):
-        points = [(t, s[node_id]) for t, s in rows if node_id in s]
+        # This Node's own two tracks: its angle column, and its light column.
+        # Either can be absent — an axis-only mapping records no light, a
+        # button-only one records no motion — but not both, or there's
+        # nothing to upload.
+        points = [(t, a[node_id], l.get(node_id)) for t, a, l in rows if node_id in a]
+        light_only = not points and any(node_id in l for _, _, l in rows)
+        if light_only:
+            # No motion recorded for this Node, only its light: hold it
+            # wherever it currently sits and upload the light track alone.
+            points = [(t, None, l.get(node_id)) for t, _, l in rows if node_id in l]
         if not points:
             messagebox.showerror("Upload failed", f"No data for Node {node_id} in the selected source.")
             self._finish_node_upload(node_id, ok=False)
             return
         if points[-1][0] > UPLOAD_MAX_DURATION_MS:
-            points = [(t, a) for t, a in points if t <= UPLOAD_MAX_DURATION_MS]
+            points = [p for p in points if p[0] <= UPLOAD_MAX_DURATION_MS]
             self._log(f"-- upload to Node {node_id} truncated to {UPLOAD_MAX_DURATION_MS / 1000:.0f}s (Node capacity) --")
+
+        # Whatever angle this Node is holding right now, for a light-only
+        # upload (and for any row whose angle column happens to be blank).
+        known = self.known_nodes.get(node_id, {})
+        hold_angle = known.get("angle", self.last_angle_sent.get(node_id, DEFAULT_HOLD_ANGLE))
 
         # Resample to a dense, single-node point list at real-time pace —
         # the same mechanism CSV playback uses, just targeting one Node and
         # never touching the other columns (only this Node's data is ever
         # transmitted to it).
-        single_node_rows = [(t, {node_id: a}) for t, a in points]
+        single_node_rows = [
+            (t, {} if a is None else {node_id: a}, {} if l is None else {node_id: l})
+            for t, a, l in points
+        ]
         plan = resample_rows(single_node_rows, TICK_INTERVAL_MS, 1.0)
 
         needed_bytes = estimate_sequence_file_bytes(points[-1][0])
         self._uploads[node_id] = {
             "name": name, "plan": plan, "index": 0, "retried": False, "job": None, "phase": "start",
-            "needed_bytes": needed_bytes,
+            "needed_bytes": needed_bytes, "hold_angle": hold_angle,
         }
         self._refresh_upload_status()
 
@@ -1317,10 +1650,14 @@ class App:
             self._finish_upload_stream(node_id)
             return
 
-        t_ms, sample = plan[idx]
-        angle = sample[node_id]
+        t_ms, sample, lights = plan[idx]
+        # Same fallback as playback: a Node whose recording is light-only has
+        # no angle track, so hold it wherever it already is while its light
+        # is replayed into the Node's own recording.
+        angle = sample.get(node_id, state["hold_angle"])
+        relay_on = lights.get(node_id, False)
         try:
-            self.link.send({"node": node_id, "angle": round(angle, 1)})
+            self._send_node(node_id, angle, relay_on)
         except (RuntimeError, serial.SerialException, OSError) as exc:
             self._log(f"-- upload send failed, aborting (Node {node_id}): {exc} --")
             self._set_solo_status(node_id, f"upload to Node {node_id} failed (send error)")

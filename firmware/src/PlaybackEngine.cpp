@@ -3,10 +3,16 @@
 #include "SequenceStore.h"
 #include "Config.h"
 
-void PlaybackEngine::begin(IAngleSink *sink, SequenceStore *sequence) {
+void PlaybackEngine::begin(IAngleSink *sink, SequenceStore *sequence, IRelaySink *relay) {
   servo_ = sink;
   sequence_ = sequence;
+  relay_ = relay;
   mode_ = PlaybackMode::IDLE;
+}
+
+void PlaybackEngine::setAngleLimits(float minDeg, float maxDeg) {
+  minAngleDeg_ = minDeg;
+  maxAngleDeg_ = maxDeg;
 }
 
 void PlaybackEngine::tick(uint32_t now) {
@@ -28,20 +34,29 @@ void PlaybackEngine::tick(uint32_t now) {
 
     case PlaybackMode::RECORDING:
       if (now - lastRecordCaptureMs_ >= RECORD_INTERVAL_MS) {
-        sequence_->captureTick(servo_->getAngle(), now - modeStartMs_);
+        sequence_->captureTick(servo_->getAngle(), relayState(), now - modeStartMs_);
         lastRecordCaptureMs_ = now;
       }
       break;
 
     case PlaybackMode::PATTERN: {
-      const float angle = PatternEngine::computeAngle(activePattern_, now - modeStartMs_);
+      const uint32_t elapsed = now - modeStartMs_;
+      const float angle =
+          activePattern_.type == PatternType::RANDOM
+              ? PatternEngine::computeRandomAngle(activePattern_, randomState_, elapsed, minAngleDeg_, maxAngleDeg_)
+              : PatternEngine::computeAngle(activePattern_, elapsed);
       servo_->writeAngle(angle);
       break;
     }
 
     case PlaybackMode::SEQUENCE: {
-      const float angle = sequence_->angleAtTime(now - modeStartMs_);
-      servo_->writeAngle(angle);
+      const uint32_t elapsed = now - modeStartMs_;
+      servo_->writeAngle(sequence_->angleAtTime(elapsed));
+      // Playback owns the light for as long as it runs — the recording's own
+      // relay track is replayed alongside its motion. Both sinks ignore a
+      // write that doesn't change anything, so this doesn't chatter the relay
+      // (or, on a Master, spam ESP-NOW) at the 50 Hz tick rate.
+      if (relay_) relay_->writeRelay(sequence_->relayAtTime(elapsed));
       break;
     }
   }
@@ -55,16 +70,24 @@ void PlaybackEngine::onJog(float angleDeg, uint32_t now) {
   (void)now;
 }
 
-void PlaybackEngine::onNetworkCommand(float angleDeg, uint32_t now) {
+void PlaybackEngine::onNetworkCommand(float angleDeg, bool relayOn, uint32_t now) {
   servo_->writeAngle(angleDeg);
+  if (relay_) relay_->writeRelay(relayOn);
   if (mode_ != PlaybackMode::RECORDING) {
     mode_ = PlaybackMode::NETWORK;
   }
   (void)now;
 }
 
+void PlaybackEngine::onRelayToggle(bool on) {
+  if (relay_) relay_->writeRelay(on);
+}
+
 void PlaybackEngine::startPattern(const PatternParams &params, uint32_t now) {
   activePattern_ = params;
+  // Starts from wherever the servo is right now, so the first random move
+  // eases out of the current position instead of jumping to it.
+  PatternEngine::resetRandom(randomState_, servo_->getAngle());
   mode_ = PlaybackMode::PATTERN;
   modeStartMs_ = now;
 }
@@ -78,7 +101,7 @@ void PlaybackEngine::startRecording(uint32_t now) {
   mode_ = PlaybackMode::RECORDING;
   modeStartMs_ = now;
   lastRecordCaptureMs_ = now;
-  sequence_->captureTick(servo_->getAngle(), 0);
+  sequence_->captureTick(servo_->getAngle(), relayState(), 0);
 }
 
 void PlaybackEngine::stopRecording() {

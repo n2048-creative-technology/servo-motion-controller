@@ -13,8 +13,8 @@ namespace {
 // Fine in practice: exactly one NetworkLink is ever constructed (in main.cpp).
 NetworkLink *g_instance = nullptr;
 
-void onRecvTrampoline(const uint8_t *mac, const uint8_t *data, int len) {
-  (void)mac;
+void onRecvTrampoline(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  (void)info;
   if (g_instance) g_instance->onRecv(data, len);
 }
 
@@ -64,6 +64,7 @@ void NetworkLink::loopTick(uint32_t now) {
     pkt.type = NET_PACKET_TYPE_HELLO;
     pkt.nodeId = nodeId_;
     pkt.angleDeg = localAngle_;
+    pkt.relayOn = localRelay_ ? 1 : 0;
     esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
   } else if (mode_ == OperatingMode::MASTER) {
     resendDueCommands(now);
@@ -101,28 +102,39 @@ void NetworkLink::loopTick(uint32_t now) {
   }
 }
 
-bool NetworkLink::transmitCommand(uint8_t targetNode, float angleDeg) {
+bool NetworkLink::transmitCommand(uint8_t targetNode, float angleDeg, bool relayOn) {
   NetPacket pkt;
   pkt.type = NET_PACKET_TYPE_CMD;
   pkt.targetNode = targetNode;
   pkt.angleDeg = angleDeg;
+  pkt.relayOn = relayOn ? 1 : 0;
   pkt.sessionId = sessionId_;
   pkt.seq = nextSeq_++;
   return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
 }
 
-bool NetworkLink::sendCommand(uint8_t targetNode, float angleDeg) {
+bool NetworkLink::sendCommand(uint8_t targetNode, float angleDeg, bool relayOn) {
   if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
-  const bool ok = transmitCommand(targetNode, angleDeg);
-  if (ok) recordLastCommand(targetNode, angleDeg, millis());
+  const bool ok = transmitCommand(targetNode, angleDeg, relayOn);
+  if (ok) recordLastCommand(targetNode, angleDeg, relayOn, millis());
   return ok;
 }
 
-void NetworkLink::recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t now) {
+bool NetworkLink::lastRelayFor(uint8_t targetNode) const {
+  for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
+    if (lastCommands_[i].inUse && lastCommands_[i].targetNode == targetNode) {
+      return lastCommands_[i].relayOn;
+    }
+  }
+  return false;
+}
+
+void NetworkLink::recordLastCommand(uint8_t targetNode, float angleDeg, bool relayOn, uint32_t now) {
   int freeSlot = -1;
   for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
     if (lastCommands_[i].inUse && lastCommands_[i].targetNode == targetNode) {
       lastCommands_[i].angleDeg = angleDeg;
+      lastCommands_[i].relayOn = relayOn;
       lastCommands_[i].lastSentMs = now;
       return;
     }
@@ -134,6 +146,7 @@ void NetworkLink::recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t
   const int slot = freeSlot >= 0 ? freeSlot : 0;
   lastCommands_[slot].targetNode = targetNode;
   lastCommands_[slot].angleDeg = angleDeg;
+  lastCommands_[slot].relayOn = relayOn;
   lastCommands_[slot].lastSentMs = now;
   lastCommands_[slot].inUse = true;
 }
@@ -196,17 +209,18 @@ void NetworkLink::resendDueCommands(uint32_t now) {
     LastCommand &cmd = lastCommands_[i];
     if (!cmd.inUse) continue;
     if (now - cmd.lastSentMs >= NET_CMD_RESEND_INTERVAL_MS) {
-      transmitCommand(cmd.targetNode, cmd.angleDeg);
+      transmitCommand(cmd.targetNode, cmd.angleDeg, cmd.relayOn);
       cmd.lastSentMs = now;
     }
   }
 }
 
-void NetworkLink::recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now) {
+void NetworkLink::recordHello(uint8_t fromNodeId, float angleDeg, bool relayOn, uint32_t now) {
   int freeSlot = -1;
   for (uint8_t i = 0; i < NET_MAX_TRACKED_NODES; i++) {
     if (knownNodes_[i].inUse && knownNodes_[i].id == fromNodeId) {
       knownNodes_[i].angleDeg = angleDeg;
+      knownNodes_[i].relayOn = relayOn;
       knownNodes_[i].lastSeenMs = now;
       return;
     }
@@ -216,6 +230,7 @@ void NetworkLink::recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now) 
     KnownNode &slot = knownNodes_[freeSlot];
     slot.id = fromNodeId;
     slot.angleDeg = angleDeg;
+    slot.relayOn = relayOn;
     slot.lastSeenMs = now;
     slot.inUse = true;
   }
@@ -239,7 +254,7 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
   const uint32_t now = millis();
 
   if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_HELLO) {
-    recordHello(pkt.nodeId, pkt.angleDeg, now);
+    recordHello(pkt.nodeId, pkt.angleDeg, pkt.relayOn != 0, now);
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_CMD) {
     if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
     if (!isfinite(pkt.angleDeg)) return; // corrupted/garbage payload: never let this reach the servo
@@ -256,7 +271,7 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     haveSession_ = true;
     lastSessionId_ = pkt.sessionId;
     lastAppliedSeq_ = pkt.seq;
-    if (nodeCommandCb_) nodeCommandCb_(pkt.angleDeg);
+    if (nodeCommandCb_) nodeCommandCb_(pkt.angleDeg, pkt.relayOn != 0);
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_START) {
     if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
     // Deferred to loopTick() — see the pendingSeqStart_/pendingSeqStop_

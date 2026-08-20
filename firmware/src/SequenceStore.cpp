@@ -71,10 +71,12 @@ void SequenceStore::startRecording() {
   durationMs_ = 0;
 }
 
-void SequenceStore::captureTick(float angleDeg, uint32_t elapsedMs) {
+void SequenceStore::captureTick(float angleDeg, bool relayOn, uint32_t elapsedMs) {
   if (!recording_ || count_ >= MAX_SEQ_POINTS) return;
   points_[count_].t_ms = elapsedMs;
   points_[count_].angle_decideg = static_cast<int16_t>(angleDeg * 10.0f);
+  points_[count_].flags = relayOn ? SEQ_FLAG_RELAY_ON : 0;
+  points_[count_].reserved = 0;
   count_++;
   durationMs_ = elapsedMs;
 }
@@ -135,8 +137,8 @@ bool SequenceStore::loadNamed(const char *name) {
     f.close();
     return false;
   }
-  if (header.magic != SEQUENCE_FILE_MAGIC || header.version != SEQUENCE_FILE_VERSION ||
-      header.pointCount > MAX_SEQ_POINTS) {
+  if (header.magic != SEQUENCE_FILE_MAGIC || header.version < SEQUENCE_FILE_VERSION_MIN ||
+      header.version > SEQUENCE_FILE_VERSION || header.pointCount > MAX_SEQ_POINTS) {
     f.close();
     return false;
   }
@@ -146,6 +148,16 @@ bool SequenceStore::loadNamed(const char *name) {
   f.close();
 
   if (got != bytesToRead) return false;
+
+  if (header.version < 2) {
+    // v1 point records are the same 8 bytes, but their last two are padding
+    // the writer never initialized — reading them as relay flags would replay
+    // an old recording with the light flickering at random.
+    for (uint16_t i = 0; i < header.pointCount; i++) {
+      points_[i].flags = 0;
+      points_[i].reserved = 0;
+    }
+  }
 
   count_ = header.pointCount;
   durationMs_ = header.durationMs;
@@ -171,7 +183,8 @@ uint8_t SequenceStore::listSequences(SequenceInfo *out, uint8_t maxCount) const 
       if (dot > 0) {
         FileHeader header;
         if (f.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) == sizeof(header) &&
-            header.magic == SEQUENCE_FILE_MAGIC && header.version == SEQUENCE_FILE_VERSION) {
+            header.magic == SEQUENCE_FILE_MAGIC && header.version >= SEQUENCE_FILE_VERSION_MIN &&
+            header.version <= SEQUENCE_FILE_VERSION) {
           String name = base.substring(0, dot);
           strncpy(out[found].name, name.c_str(), sizeof(out[found].name) - 1);
           out[found].name[sizeof(out[found].name) - 1] = '\0';
@@ -266,4 +279,20 @@ float SequenceStore::angleAtTime(uint32_t t_ms) const {
   const float angleLast = last.angle_decideg / 10.0f;
   const float angleFirst = first.angle_decideg / 10.0f;
   return angleLast + t * (angleFirst - angleLast);
+}
+
+bool SequenceStore::relayAtTime(uint32_t t_ms) const {
+  if (count_ == 0) return false;
+  if (count_ == 1 || durationMs_ == 0) return (points_[0].flags & SEQ_FLAG_RELAY_ON) != 0;
+
+  const uint32_t wrapped = t_ms % durationMs_;
+
+  // Last point at or before `wrapped`; points are captured in time order, so
+  // the first point past it ends the search.
+  uint16_t idx = 0;
+  for (uint16_t i = 0; i < count_; i++) {
+    if (points_[i].t_ms > wrapped) break;
+    idx = i;
+  }
+  return (points_[idx].flags & SEQ_FLAG_RELAY_ON) != 0;
 }

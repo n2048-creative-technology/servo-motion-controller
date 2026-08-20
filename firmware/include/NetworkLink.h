@@ -40,6 +40,14 @@ struct NetPacket {
   uint8_t status = 0;      // SEQ_ACK only: 0 = saved OK, nonzero = a SeqAckStatus reason code
   uint16_t pointCount = 0; // SEQ_ACK only: points captured/saved
   uint32_t freeBytes = 0;  // SPACE_REPLY only: bytes free in the Node's LittleFS
+  // CMD: the relay/light state that goes with this angle. Carried on every
+  // CMD rather than sent as its own packet type so it inherits the angle's
+  // resend/ordering guarantees for free — and so a Node recording a
+  // Master-driven sequence captures the light exactly in step with the
+  // motion, which a separate best-effort packet couldn't promise.
+  // HELLO: the sender's own current relay state, so a Master's node table
+  // (and the PC tools reading it) can show each Node's actual light.
+  uint8_t relayOn = 0;
 };
 
 static constexpr uint8_t NET_PACKET_TYPE_CMD = 1;
@@ -74,6 +82,7 @@ enum class SeqAckStatus : uint8_t {
 struct KnownNode {
   uint8_t id = 0;
   float angleDeg = 0.0f;
+  bool relayOn = false;
   uint32_t lastSeenMs = 0;
   bool inUse = false;
 };
@@ -84,6 +93,7 @@ struct KnownNode {
 struct LastCommand {
   uint8_t targetNode = 0;
   float angleDeg = 0.0f;
+  bool relayOn = false;
   uint32_t lastSentMs = 0;
   bool inUse = false;
 };
@@ -107,11 +117,30 @@ public:
   // (jog, pattern, sequence, or a prior network command).
   void reportLocalAngle(float angleDeg) { localAngle_ = angleDeg; }
 
-  // MASTER only: broadcast a CMD packet addressed to targetNode (0 = all).
-  bool sendCommand(uint8_t targetNode, float angleDeg);
+  // NODE only: same idea for the relay, so the HELLO heartbeat reports the
+  // light's real state no matter what switched it (web UI, a Master's CMD, or
+  // sequence playback).
+  void reportLocalRelay(bool on) { localRelay_ = on; }
+
+  // MASTER only: broadcast a CMD packet addressed to targetNode (0 = all),
+  // carrying both the angle and the relay/light state for that target.
+  //
+  // Relay state is tracked *per target* (alongside the angle, in
+  // lastCommands_) rather than as one Master-wide value: a controller with a
+  // button per Node has to be able to switch one Node's light without
+  // touching another's, and a single shared flag would leak onto every other
+  // target's periodic resend. Note that targetNode 0 (broadcast) is its own
+  // entry, so a broadcast command carries the broadcast entry's relay state
+  // to every Node — mix broadcast and per-node commands with that in mind.
+  bool sendCommand(uint8_t targetNode, float angleDeg, bool relayOn);
+
+  // MASTER only: the relay state last sent to that target (false if it has
+  // never been commanded). Lets a caller that only wants to move a Node
+  // resend its existing light state rather than guessing at one.
+  bool lastRelayFor(uint8_t targetNode) const;
 
   // NODE only: invoked when a CMD addressed to us (or to "all") arrives.
-  void onNodeCommand(std::function<void(float angleDeg)> callback) { nodeCommandCb_ = callback; }
+  void onNodeCommand(std::function<void(float angleDeg, bool relayOn)> callback) { nodeCommandCb_ = callback; }
 
   // NODE only: invoked when a SEQ_START/SEQ_STOP/SEQ_CLEAR/SPACE_QUERY addressed to us arrives.
   void onSeqStart(std::function<void()> callback) { seqStartCb_ = callback; }
@@ -164,7 +193,9 @@ private:
   uint32_t lastAppliedSeq_ = 0;
   bool haveSession_ = false;
 
-  std::function<void(float angleDeg)> nodeCommandCb_;
+  bool localRelay_ = false; // Node: relay state reported in its HELLO
+
+  std::function<void(float angleDeg, bool relayOn)> nodeCommandCb_;
   std::function<void()> seqStartCb_;
   std::function<void(const char *name)> seqStopCb_;
   std::function<void()> seqClearCb_;
@@ -222,9 +253,9 @@ private:
   bool pendingSeqClear_ = false;
   bool pendingSpaceQuery_ = false;
 
-  void recordHello(uint8_t fromNodeId, float angleDeg, uint32_t now);
-  void recordLastCommand(uint8_t targetNode, float angleDeg, uint32_t now);
-  bool transmitCommand(uint8_t targetNode, float angleDeg);
+  void recordHello(uint8_t fromNodeId, float angleDeg, bool relayOn, uint32_t now);
+  void recordLastCommand(uint8_t targetNode, float angleDeg, bool relayOn, uint32_t now);
+  bool transmitCommand(uint8_t targetNode, float angleDeg, bool relayOn);
   void resendDueCommands(uint32_t now);
 
 public:

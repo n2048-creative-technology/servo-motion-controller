@@ -5,12 +5,21 @@ ESP32S3, powered over USB-C. On boot it creates its own WiFi access point and
 hosts a mobile-first web app (open the AP's IP in a phone browser, WLED-style)
 for:
 
-- Live manual jogging of the servo with a slider.
+- Live manual jogging of the servo with a slider, whose range follows the
+  servo's own calibrated travel (270° out of the box, 180° if that's how you
+  set the servo up).
+- A relay output on pin **D7** for a light, switched by a toggle beside the
+  jog slider.
 - Parametric motion patterns — sine, square, triangle, sawtooth, trapezoid —
   each with adjustable period/amplitude/offset (and duty or rise/hold/fall
   ratios where relevant), looped continuously.
+- A **random** pattern: new target angles picked inside the servo's calibrated
+  range at randomly-drawn intervals between two limits you set. Every move is
+  speed-limited and eased in/out rather than jumped, so the servo tracks it
+  smoothly instead of slamming from one position to the next.
 - Recording a manual movement (drag the jog slider) as a timestamped
-  sequence, then saving and looping it back.
+  sequence, then saving and looping it back — the relay's state is captured
+  and replayed along with the motion.
 - An **autostart** setting: on every power-up/reset, the configured pattern
   or saved sequence starts looping automatically with no user interaction,
   because it's applied *before* WiFi/the web server come up.
@@ -24,6 +33,7 @@ environment (`seeed_xiao_esp32c3` or `seeed_xiao_esp32s3`) when building/flashin
 |---|---|---|
 | Power | USB-C (5V from host/charger) | USB-C (5V from host/charger) |
 | Servo signal | **pin D10 (GPIO10)** → servo signal wire | **pin D10 (GPIO9)** → servo signal wire |
+| Relay / light | **pin D7 (GPIO20)** → relay module IN | **pin D7 (GPIO44)** → relay module IN |
 | Flash / RAM | 4MB / ~400KB SRAM | 8MB / ~512KB SRAM |
 
 Both boards use the **same silkscreen-labeled pin D10** for the servo signal
@@ -106,21 +116,29 @@ to finish verification.
 
 Three tabs, reachable from the bottom nav:
 
-- **Manual** — jog slider (live, ~25 Hz over WebSocket) + pattern picker with
-  generated parameter fields and Start/Stop.
+- **Manual** — jog slider (live, ~25 Hz over WebSocket) with a Light toggle
+  for the D7 relay beside it, + pattern picker with generated parameter fields
+  and Start/Stop. The slider's range and the pattern forms' angle fields both
+  follow the servo calibration set in Settings.
 
   <img src="images/webui-manual.png" alt="Manual tab: jog slider and pattern picker" width="300">
 
-- **Record** — start/stop recording (captures the servo's position at a
-  fixed 20 Hz while you jog it), live trace, save/discard, and play/stop the
-  saved sequence on a loop.
+- **Record** — start/stop recording (captures the servo's position *and* the
+  relay's state at a fixed 20 Hz while you jog it), live trace, save/discard,
+  and play/stop the saved sequence on a loop. Playback drives the light from
+  the recording just as it drives the servo. The trace plots both: the servo
+  angle as a line, and the light as a solid lane along the bottom (with a
+  faint wash over the motion it happened during), so you can see at a glance
+  which part of a take was lit.
 
   <img src="images/webui-record.png" alt="Record tab: recording controls and saved sequence" width="300">
 
 - **Settings** — AP SSID/password, servo calibration (including **Invert
   direction**, for a servo mounted mirrored/reversed relative to its
-  calibrated min/max angle), autostart enable/target (pattern or sequence)
-  with its own parameter fields, and a factory-reset button.
+  calibrated min/max angle), relay polarity (**Active low**, for the
+  opto-isolated relay boards that switch closed on a low input), autostart
+  enable/target (pattern or sequence) with its own parameter fields, and a
+  factory-reset button.
 
   <img src="images/webui-settings-calibration.png" alt="Settings tab: AP, servo calibration with invert checkbox" width="300">
 
@@ -236,10 +254,13 @@ rather than misbehave.
   (`Preferences`, versioned blob — a magic/version mismatch falls back to
   factory defaults instead of crashing).
 - Each recorded sequence lives in LittleFS at `/seq/<name>.bin` (12-byte
-  header + up to 12000 points of `{t_ms, angle*10}`, i.e. up to 10 minutes at
-  the 20 Hz capture rate — a board can hold several, named, picked for
-  autostart or manual playback). It's only written on explicit **Save**,
-  never per-sample, to avoid flash wear.
+  header + up to 12000 points of `{t_ms, angle*10, flags}`, i.e. up to 10
+  minutes at the 20 Hz capture rate — a board can hold several, named, picked
+  for autostart or manual playback). It's only written on explicit **Save**,
+  never per-sample, to avoid flash wear. The relay state rides in a `flags`
+  byte that fits in the padding the point struct already carried, so it costs
+  neither RAM nor file size, and sequences recorded before it existed still
+  load (their light simply stays off).
 
 ## Known limitations / risks
 

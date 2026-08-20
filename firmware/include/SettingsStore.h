@@ -35,6 +35,9 @@ struct PersistedSettings {
   float servoCenterAngle = SERVO_DEFAULT_CENTER_ANGLE;
   bool servoInvert = false;
 
+  // Relay/light output on D7 — see RELAY_PIN in Config.h.
+  bool relayActiveLow = RELAY_DEFAULT_ACTIVE_LOW;
+
   bool autostartEnabled = false;
   AutostartTarget autostartTarget = AutostartTarget::NONE;
   PatternParams autostartPattern;

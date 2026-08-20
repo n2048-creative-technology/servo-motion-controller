@@ -4,10 +4,21 @@
 #include <stddef.h>
 #include "Config.h"
 
+// 8 bytes, and deliberately still 8 bytes now that it carries the relay
+// state: `flags` and `reserved` occupy the two bytes the compiler was already
+// inserting as padding after angle_decideg in v1. That's what keeps
+// MAX_SEQ_POINTS' RAM budget (see Config.h) unchanged, and what lets a v1
+// file be read back as-is — see SEQUENCE_FILE_VERSION.
 struct SequencePoint {
   uint32_t t_ms;
   int16_t angle_decideg; // angle * 10
+  uint8_t flags;         // bit 0: relay/light on at this instant
+  uint8_t reserved;
 };
+static_assert(sizeof(SequencePoint) == 8, "SequencePoint must stay 8 bytes: MAX_SEQ_POINTS' RAM budget "
+                                          "and the on-disk sequence format both assume it");
+
+static constexpr uint8_t SEQ_FLAG_RELAY_ON = 0x01;
 
 // Why saveAs() failed, if it did — surfaced over ESP-NOW as SeqAckStatus
 // (see NetworkLink.h) and to the local web UI, so a failure reads as
@@ -45,7 +56,9 @@ public:
 
   void startRecording();
   // Called at RECORD_INTERVAL_MS cadence while recording; ignored if buffer is full.
-  void captureTick(float angleDeg, uint32_t elapsedMs);
+  // The relay state is sampled alongside the angle, so a recording replays the
+  // light exactly as it was switched during capture.
+  void captureTick(float angleDeg, bool relayOn, uint32_t elapsedMs);
   void stopRecording();
   bool isRecording() const { return recording_; }
   uint16_t recordedPointCount() const { return count_; }
@@ -67,6 +80,11 @@ public:
 
   // Linear interpolation between bracketing points; t_ms wraps modulo durationMs.
   float angleAtTime(uint32_t t_ms) const;
+
+  // The relay state at that same instant. Held (not interpolated) from the
+  // most recent point at or before t_ms — a relay is on or off, and blending
+  // between the two would mean chattering it at the sample rate.
+  bool relayAtTime(uint32_t t_ms) const;
 
   // Directory listing: fills `out[0..returned)` and returns how many were
   // found (capped at maxCount, and at SEQ_MAX_LISTED regardless).

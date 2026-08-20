@@ -4,7 +4,9 @@
 
 #include "Config.h"
 #include "IAngleSink.h"
+#include "IRelaySink.h"
 #include "ServoController.h"
+#include "RelayController.h"
 #include "SettingsStore.h"
 #include "SequenceStore.h"
 #include "PlaybackEngine.h"
@@ -14,6 +16,7 @@
 #include "SerialBridge.h"
 
 ServoController servo;
+RelayController relay;
 SettingsStore settingsStore;
 SequenceStore sequenceStore;
 PlaybackEngine playback;
@@ -56,6 +59,10 @@ void setup() {
   Serial.printf("[SELFTEST] servo attached pin=%d range=%u-%uus\n", SERVO_PIN, settings.servoMinUs,
                 settings.servoMaxUs);
 
+  relay.begin(RELAY_PIN, settings.relayActiveLow);
+  Serial.printf("[SELFTEST] relay pin=%d active_%s, starting off\n", RELAY_PIN,
+                settings.relayActiveLow ? "low" : "high");
+
   bool fsOk = LittleFS.begin(true);
   Serial.printf("[SELFTEST] littlefs mount %s\n", fsOk ? "OK" : "FAILED");
 
@@ -79,6 +86,7 @@ void setup() {
   // NetworkAngleSink; every other mode drives the physical ServoController
   // exactly as in v1. Autostart only makes sense with a real attached servo.
   IAngleSink *sink = &servo;
+  IRelaySink *relaySink = &relay;
   if (settings.networkMode == OperatingMode::MASTER) {
     // Always full power — see WIFI_TX_POWER_MAX's comment in Config.h. Set
     // explicitly rather than just never lowering it, so this doesn't
@@ -86,6 +94,9 @@ void setup() {
     WiFi.setTxPower(static_cast<wifi_power_t>(WIFI_TX_POWER_MAX));
     networkAngleSink.begin(&networkLink);
     sink = &networkAngleSink;
+    // A Master's own D7 stays idle: its light toggle drives the selected
+    // Node(s)' relays over ESP-NOW, exactly like its jog slider does.
+    relaySink = &networkAngleSink;
     serialBridge.begin(&networkLink);
     networkLink.onSeqAck([](uint8_t nodeId, const char *name, SeqAckStatus status, uint16_t points) {
       serialBridge.reportUploadResult(nodeId, name, status, points);
@@ -94,7 +105,8 @@ void setup() {
       serialBridge.reportSpaceReply(nodeId, freeBytes);
     });
   } else if (settings.networkMode == OperatingMode::NODE) {
-    networkLink.onNodeCommand([](float angleDeg) { playback.onNetworkCommand(angleDeg, millis()); });
+    networkLink.onNodeCommand(
+        [](float angleDeg, bool relayOn) { playback.onNetworkCommand(angleDeg, relayOn, millis()); });
     // A Master remotely uploading a sequence is just a remotely-triggered
     // recording: start/stop reuse the exact same PlaybackEngine/SequenceStore
     // calls the local /api/record/start|save routes make (see WebApi.cpp) —
@@ -127,7 +139,8 @@ void setup() {
     networkLink.onSeqClear([]() { sequenceStore.clearAll(); });
     networkLink.onSpaceQuery([]() { networkLink.sendSpaceReply(SequenceStore::freeSpaceBytes()); });
   }
-  playback.begin(sink, &sequenceStore);
+  playback.begin(sink, &sequenceStore, relaySink);
+  playback.setAngleLimits(settings.servoMinAngle, settings.servoMaxAngle);
 
   if (settings.networkMode != OperatingMode::MASTER) {
     // Applied before the web server comes up: a configured pattern/sequence
@@ -140,7 +153,7 @@ void setup() {
     }
   }
 
-  webApi.begin(&playback, &sequenceStore, &settingsStore, &servo, &networkLink, sink, AP_IP);
+  webApi.begin(&playback, &sequenceStore, &settingsStore, &servo, &relay, &networkLink, sink, AP_IP);
   Serial.println("[SELFTEST] webserver started, ws clients=0");
 
   Serial.printf("[SELFTEST] free heap=%u bytes, network mode=%d node_id=%u\n", ESP.getFreeHeap(),
@@ -154,6 +167,7 @@ void loop() {
     lastTickMs = now;
     playback.tick(now);
     networkLink.reportLocalAngle(servo.getAngle());
+    networkLink.reportLocalRelay(relay.relayState());
 
     if (bootNetworkMode == OperatingMode::NODE) {
       const bool motorActive = playback.mode() != PlaybackMode::IDLE;

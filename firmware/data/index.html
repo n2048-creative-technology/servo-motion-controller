@@ -19,6 +19,8 @@
 
 <main>
 
+  <div id="verWarn" class="banner" style="display:none;"></div>
+
   <section id="tab-manual" class="tab active">
     <div class="card" id="targetCard" style="display:none;">
       <h2>Target (Master)</h2>
@@ -39,8 +41,16 @@
 
     <div class="card">
       <h2>Jog</h2>
-      <input id="jogSlider" type="range" min="0" max="270" step="0.5" value="135" class="jog">
+      <div class="jogrow">
+        <input id="jogSlider" type="range" min="0" max="270" step="0.5" value="135" class="jog">
+        <label class="switch" title="Relay output on D7">
+          <input id="relayToggle" type="checkbox">
+          <span class="switchtrack"></span>
+          <span class="switchlabel">Light</span>
+        </label>
+      </div>
       <div class="jogreadout"><span id="jogValue">135.0</span>&deg;</div>
+      <p class="hint" id="jogRangeHint">Range follows the servo calibration in Settings.</p>
     </div>
 
     <div class="card">
@@ -60,13 +70,17 @@
   <section id="tab-record" class="tab">
     <div class="card">
       <h2>Record Motion</h2>
-      <p class="hint">Start recording, then move the servo with the Manual jog slider on this or another tab. Samples are captured automatically while recording.</p>
+      <p class="hint">Start recording, then move the servo with the Manual jog slider on this or another tab. Samples are captured automatically while recording &mdash; including the Light toggle's state, which is replayed with the motion.</p>
       <div class="recstate">
         <span id="recDot" class="dot dot-off"></span>
         <span id="recLabel">idle</span>
         <span id="recPoints">0 pts</span>
       </div>
       <canvas id="recCanvas" width="600" height="120" class="trace"></canvas>
+      <div class="tracelegend">
+        <span><i class="sw-angle"></i>servo angle</span>
+        <span><i class="sw-light"></i>light on</span>
+      </div>
       <div class="btnrow">
         <button id="recStart" class="btn btn-go">Start Recording</button>
         <button id="recStop" class="btn btn-stop">Stop Recording</button>
@@ -130,6 +144,18 @@
     </div>
 
     <div class="card">
+      <h2>Relay / Light</h2>
+      <p class="hint">On/off output on pin <code id="relayPinLabel">D7</code>, switched by the Light toggle next to the Jog fader and recorded into sequences alongside the servo angle.</p>
+      <label class="field checkfield">
+        <input id="relayActiveLow" type="checkbox">
+        <span>Active low (most opto-isolated relay boards switch on when their IN pin is pulled low)</span>
+      </label>
+      <div class="btnrow">
+        <button id="relaySave" class="btn btn-primary">Save Relay Settings</button>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Autostart on Boot</h2>
       <label class="field checkfield">
         <input id="asEnabled" type="checkbox">
@@ -175,13 +201,23 @@
       <div id="netMasterInfo" class="hint">
         Connect this board to a PC over USB serial at 115200 baud and send one JSON object per line, e.g. <code>{"node":3,"angle":120.5}</code> (<code>node:0</code> = all nodes), or <code>{"cmd":"list"}</code> to list known nodes. See <code>docs/serial-protocol.md</code>.
         <table id="netNodesTable" class="nodetable">
-          <thead><tr><th>Node ID</th><th>Angle</th><th>Last seen</th></tr></thead>
-          <tbody id="netNodesBody"><tr><td colspan="3">no nodes heard from yet</td></tr></tbody>
+          <thead><tr><th>Node ID</th><th>Angle</th><th>Light</th><th>Last seen</th></tr></thead>
+          <tbody id="netNodesBody"><tr><td colspan="4">no nodes heard from yet</td></tr></tbody>
         </table>
       </div>
       <div class="btnrow">
         <button id="netSave" class="btn btn-primary">Save Network Settings</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>About</h2>
+      <p class="hint">
+        Firmware <code id="fwVersion">--</code> on this board. If this doesn't
+        match the build you just flashed, the firmware upload didn't take —
+        re-run <code>pio run -e $ENV -t upload</code> (the web UI files are a
+        separate <code>-t uploadfs</code> step, so one can be newer than the other).
+      </p>
     </div>
 
     <div class="card">

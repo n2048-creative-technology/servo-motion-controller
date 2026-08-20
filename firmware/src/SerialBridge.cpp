@@ -113,6 +113,7 @@ void SerialBridge::handleLine(const char *line) {
       JsonObject n = nodes.add<JsonObject>();
       n["id"] = known[i].id;
       n["angle"] = known[i].angleDeg;
+      n["relay"] = known[i].relayOn;
       n["age_ms"] = now - known[i].lastSeenMs;
     }
     String outStr;
@@ -133,7 +134,16 @@ void SerialBridge::handleLine(const char *line) {
     return;
   }
 
-  bool ok = network_->sendCommand(static_cast<uint8_t>(node), angle);
+  // Optional: switch this target's relay/light in the same command that
+  // moves its servo. Omitting it re-sends whatever that target's light was
+  // last set to, so a PC tool that knows nothing about the relay can't
+  // switch one off by accident — and switching Node 3's light never
+  // disturbs Node 5's, since the Master tracks the state per target.
+  const uint8_t target = static_cast<uint8_t>(node);
+  const bool relayOn =
+      doc["relay"].is<bool>() ? doc["relay"].as<bool>() : network_->lastRelayFor(target);
+
+  bool ok = network_->sendCommand(target, angle, relayOn);
   Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
 }
 

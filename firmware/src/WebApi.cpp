@@ -10,6 +10,7 @@
 #include "SequenceStore.h"
 #include "SettingsStore.h"
 #include "ServoController.h"
+#include "RelayController.h"
 #include "NetworkLink.h"
 #include "IAngleSink.h"
 #include "Config.h"
@@ -51,6 +52,7 @@ const char *patternTypeToString(PatternType type) {
     case PatternType::TRIANGLE: return "triangle";
     case PatternType::SAWTOOTH: return "sawtooth";
     case PatternType::TRAPEZOID: return "trapezoid";
+    case PatternType::RANDOM: return "random";
   }
   return "sine";
 }
@@ -61,6 +63,7 @@ PatternType patternTypeFromString(const char *s) {
   if (strcmp(s, "triangle") == 0) return PatternType::TRIANGLE;
   if (strcmp(s, "sawtooth") == 0) return PatternType::SAWTOOTH;
   if (strcmp(s, "trapezoid") == 0) return PatternType::TRAPEZOID;
+  if (strcmp(s, "random") == 0) return PatternType::RANDOM;
   return PatternType::SINE;
 }
 
@@ -74,6 +77,19 @@ PatternParams parsePatternParams(JsonVariant json, const PatternParams &fallback
   if (json["rise_pct"].is<float>()) p.risePct = json["rise_pct"].as<float>();
   if (json["hold_pct"].is<float>()) p.holdPct = json["hold_pct"].as<float>();
   if (json["fall_pct"].is<float>()) p.fallPct = json["fall_pct"].as<float>();
+  // Taken as floats and rounded rather than required to be integral: a UI
+  // that hands back "1500.0" for a millisecond field shouldn't have its value
+  // silently ignored.
+  if (json["interval_min_ms"].is<float>()) {
+    p.randMinIntervalMs = static_cast<uint32_t>(clampValue(json["interval_min_ms"].as<float>(), 0.0f, 600000.0f));
+  }
+  if (json["interval_max_ms"].is<float>()) {
+    p.randMaxIntervalMs = static_cast<uint32_t>(clampValue(json["interval_max_ms"].as<float>(), 0.0f, 600000.0f));
+  }
+  if (json["max_speed_dps"].is<float>()) {
+    p.randMaxSpeedDps = clampValue(json["max_speed_dps"].as<float>(), PATTERN_RANDOM_MIN_SPEED_DPS,
+                                    PATTERN_RANDOM_MAX_SPEED_DPS);
+  }
   return p;
 }
 
@@ -86,17 +102,21 @@ void writePatternParams(JsonObject obj, const PatternParams &p) {
   obj["rise_pct"] = p.risePct;
   obj["hold_pct"] = p.holdPct;
   obj["fall_pct"] = p.fallPct;
+  obj["interval_min_ms"] = p.randMinIntervalMs;
+  obj["interval_max_ms"] = p.randMaxIntervalMs;
+  obj["max_speed_dps"] = p.randMaxSpeedDps;
 }
 
 } // namespace
 
 void WebApi::begin(PlaybackEngine *playback, SequenceStore *sequence, SettingsStore *settingsStore,
-                    ServoController *servo, NetworkLink *network, IAngleSink *angleSink,
-                    const IPAddress &apIp) {
+                    ServoController *servo, RelayController *relay, NetworkLink *network,
+                    IAngleSink *angleSink, const IPAddress &apIp) {
   playback_ = playback;
   sequence_ = sequence;
   settingsStore_ = settingsStore;
   servo_ = servo;
+  relay_ = relay;
   network_ = network;
   angleSink_ = angleSink;
 
@@ -140,6 +160,7 @@ String WebApi::buildStatusJson() {
   doc["uptime_ms"] = millis();
   doc["free_heap"] = ESP.getFreeHeap();
   doc["firmware_version"] = FIRMWARE_VERSION;
+  doc["relay_on"] = playback_->relayState();
 
   JsonObject recording = doc["recording"].to<JsonObject>();
   recording["active"] = playback_->mode() == PlaybackMode::RECORDING;
@@ -177,6 +198,8 @@ void WebApi::onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, Aws
   const char *cmd = doc["cmd"] | "";
   if (strcmp(cmd, "jog") == 0 && doc["angle"].is<float>()) {
     playback_->onJog(doc["angle"].as<float>(), millis());
+  } else if (strcmp(cmd, "relay") == 0 && doc["on"].is<bool>()) {
+    playback_->onRelayToggle(doc["on"].as<bool>());
   }
 }
 
@@ -200,6 +223,9 @@ void WebApi::setupRoutes() {
         {"triangle", "Triangle", "period_ms,amplitude_deg,offset_deg"},
         {"sawtooth", "Sawtooth", "period_ms,amplitude_deg,offset_deg"},
         {"trapezoid", "Trapezoid", "period_ms,amplitude_deg,offset_deg,rise_pct,hold_pct,fall_pct"},
+        // No amplitude/offset: RANDOM sweeps the servo's whole calibrated
+        // range (Settings → Servo Calibration) rather than a window inside it.
+        {"random", "Random", "interval_min_ms,interval_max_ms,max_speed_dps"},
     };
     for (const auto &e : entries) {
       JsonObject obj = arr.add<JsonObject>();
@@ -230,6 +256,19 @@ void WebApi::setupRoutes() {
         if (json["angle_deg"].is<float>()) {
           playback_->onJog(json["angle_deg"].as<float>(), millis());
         }
+        request->send(200, "application/json", "{\"ok\":true}");
+      }));
+
+  // The light next to the jog fader. Deliberately doesn't change playback
+  // mode: switching it mid-pattern shouldn't stop the pattern, and mid-
+  // recording it's captured by the ordinary capture tick alongside the angle.
+  server_.addHandler(new AsyncCallbackJsonWebHandler(
+      "/api/relay", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (!json["on"].is<bool>()) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"expected on\"}");
+          return;
+        }
+        playback_->onRelayToggle(json["on"].as<bool>());
         request->send(200, "application/json", "{\"ok\":true}");
       }));
 
@@ -323,6 +362,11 @@ void WebApi::setupRoutes() {
     servoObj["center_angle"] = s.servoCenterAngle;
     servoObj["invert"] = s.servoInvert;
 
+    JsonObject relayObj = doc["relay"].to<JsonObject>();
+    relayObj["pin"] = relay_ ? relay_->pin() : RELAY_PIN;
+    relayObj["active_low"] = s.relayActiveLow;
+    relayObj["on"] = playback_->relayState();
+
     JsonObject autostart = doc["autostart"].to<JsonObject>();
     autostart["enabled"] = s.autostartEnabled;
     autostart["target"] = s.autostartTarget == AutostartTarget::PATTERN   ? "pattern"
@@ -376,10 +420,18 @@ void WebApi::setupRoutes() {
         }
         if (calibrationChanged) {
           servo_->setCalibration(s.servoMinUs, s.servoMaxUs, s.servoMinAngle, s.servoMaxAngle);
+          // Keeps the RANDOM pattern's targets inside the new travel limits
+          // without waiting for a reboot.
+          playback_->setAngleLimits(s.servoMinAngle, s.servoMaxAngle);
         }
         if (json["servo"]["invert"].is<bool>()) {
           s.servoInvert = json["servo"]["invert"].as<bool>();
           servo_->setInvert(s.servoInvert);
+        }
+
+        if (json["relay"]["active_low"].is<bool>()) {
+          s.relayActiveLow = json["relay"]["active_low"].as<bool>();
+          if (relay_) relay_->setActiveLow(s.relayActiveLow);
         }
 
         if (json["autostart"]["enabled"].is<bool>()) {
@@ -423,6 +475,7 @@ void WebApi::setupRoutes() {
       JsonObject n = nodes.add<JsonObject>();
       n["id"] = known[i].id;
       n["angle"] = known[i].angleDeg;
+      n["relay"] = known[i].relayOn;
       n["age_ms"] = now - known[i].lastSeenMs;
     }
     String out;

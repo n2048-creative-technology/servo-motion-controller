@@ -29,7 +29,12 @@
       "Bash(python3 -m py_compile joystick_master_gui.py)",
       "Bash(ls /dev/ttyACM* 2>&1)",
       "Read(//dev/**)",
-      "Bash(python3 /home/mauricio/.platformio/packages/tool-esptoolpy/esptool.py --port /dev/ttyACM3 --no-stub --baud 115200 chip_id)"
+      "Bash(python3 /home/mauricio/.platformio/packages/tool-esptoolpy/esptool.py --port /dev/ttyACM3 --no-stub --baud 115200 chip_id)",
+      "Read(//home/mauricio/.platformio/platforms/**)",
+      "Read(//home/mauricio/.platformio/platforms/espressif32/boards/**)",
+      "Bash(grep -n \"D7\\\\|D6\\\\|RX\\\\|TX\" ~/.platformio/packages/framework-arduinoespressif32/variants/XIAO_ESP32C3/pins_arduino.h ~/.platformio/packages/framework-arduinoespressif32/variants/XIAO_ESP32S3/pins_arduino.h 2>/dev/null | head -40)",
+      "Read(//home/mauricio/.platformio/packages/framework-arduinoespressif32/variants/XIAO_ESP32C3/**)",
+      "Bash(~/.platformio/penv/bin/pio run *)"
     ]
   }
 }
