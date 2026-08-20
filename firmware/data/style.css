@@ -20,6 +20,14 @@ html, body {
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-tap-highlight-color: transparent;
+  /* Chrome on Android treats a downward drag that starts with the document at
+     scroll-top as pull-to-refresh — which is exactly what dragging *down* on
+     the trackpad looks like, and reloading the page mid-show is not what
+     anyone wants. That's viewport overscroll, a separate mechanism from the
+     pad's own touch-action, so it has to be turned off here at the root.
+     `contain` rather than `none`: in-page scrolling (Record, Settings) keeps
+     working normally, the gesture just stops chaining out to the browser. */
+  overscroll-behavior-y: contain;
 }
 
 body {
@@ -81,12 +89,6 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
 }
 
 .hint { color: var(--text-dim); font-size: 0.88rem; margin: 0 0 10px 0; }
-
-.jog {
-  width: 100%;
-  height: 44px;
-  accent-color: var(--accent);
-}
 
 .jogreadout {
   text-align: center;
@@ -273,14 +275,14 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   color: var(--text);
 }
 
-/* Jog fader + relay toggle side by side: the fader takes whatever width is
-   left after the switch, which stays a fixed-size touch target. */
+/* Trackpad + relay toggle side by side: the pad takes whatever width is left
+   after the switch, which stays a fixed-size touch target. */
 .jogrow {
   display: flex;
   align-items: center;
   gap: 14px;
 }
-.jogrow .jog { flex: 1; min-width: 0; }
+.jogrow .pad { flex: 1; min-width: 0; }
 
 .switch {
   display: flex;
@@ -290,6 +292,12 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   flex: none;
   cursor: pointer;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  /* No double-tap-to-zoom delay on the switch, and no chance of a tap here
+     being held back as the start of a scroll — it has to respond instantly
+     even as a second finger during a trackpad drag. */
+  touch-action: manipulation;
 }
 .switch input {
   position: absolute;
@@ -349,7 +357,6 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   border-radius: 2px;
   display: inline-block;
 }
-.tracelegend .sw-angle { background: var(--accent); }
 .tracelegend .sw-light { background: var(--warn); height: 8px; }
 
 /* Shown only when the firmware and these web UI files are different versions
@@ -372,3 +379,68 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   padding: 1px 5px;
   font-size: 0.9em;
 }
+
+/* XY trackpad: square whatever the card width, so the two axes stay visually
+   proportionate to each other rather than stretching with the viewport. */
+.pad {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  max-width: 320px;
+  margin: 0 auto;
+  background: #14161a;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  touch-action: none; /* we handle the drag; don't let the page scroll instead */
+  cursor: crosshair;
+  overflow: hidden;
+  /* A drag held on one spot would otherwise raise the text-selection handles
+     or the long-press callout, both of which interrupt the aim. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+.padguide {
+  position: absolute;
+  background: #2b2f36;
+  pointer-events: none;
+}
+.padguide-v { top: 0; bottom: 0; width: 1px; }
+.padguide-h { left: 0; right: 0; height: 1px; }
+
+.paddot {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(77, 163, 255, 0.18);
+  pointer-events: none;
+}
+
+.axislabel {
+  color: var(--text-dim);
+  font-size: 0.7em;
+  margin-right: 4px;
+}
+.axissep { display: inline-block; width: 18px; }
+
+/* Per-axis grouping inside the Pattern and Calibration cards. */
+.axisblock {
+  border-top: 1px solid var(--card-border);
+  padding-top: 10px;
+  margin-top: 10px;
+}
+.axisblock:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+.axisblock h3 {
+  margin: 0 0 10px 0;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.tracelegend .sw-x { background: var(--accent); }
+.tracelegend .sw-y { background: var(--go); }

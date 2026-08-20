@@ -5,21 +5,25 @@ ESP32S3, powered over USB-C. On boot it creates its own WiFi access point and
 hosts a mobile-first web app (open the AP's IP in a phone browser, WLED-style)
 for:
 
-- Live manual jogging of the servo with a slider, whose range follows the
-  servo's own calibrated travel (270° out of the box, 180° if that's how you
-  set the servo up).
+- Live manual aiming of a **pan/tilt head** — two servos, X (pan) on D10 and
+  Y (tilt) on D3 — with a square XY trackpad whose extents follow each axis's
+  own calibrated travel (270° out of the box, 180° if that's how you set that
+  servo up).
 - A relay output on pin **D7** for a light, switched by a toggle beside the
   jog slider.
 - Parametric motion patterns — sine, square, triangle, sawtooth, trapezoid —
   each with adjustable period/amplitude/offset (and duty or rise/hold/fall
-  ratios where relevant), looped continuously.
-- A **random** pattern: new target angles picked inside the servo's calibrated
+  ratios where relevant), looped continuously. **Each axis runs its own
+  shape**, so the head can sweep in pan while nodding slowly in tilt.
+- A **random** pattern: new target angles picked inside that axis's calibrated
   range at randomly-drawn intervals between two limits you set. Every move is
   speed-limited and eased in/out rather than jumped, so the servo tracks it
-  smoothly instead of slamming from one position to the next.
-- Recording a manual movement (drag the jog slider) as a timestamped
-  sequence, then saving and looping it back — the relay's state is captured
-  and replayed along with the motion.
+  smoothly instead of slamming from one position to the next. Set both axes to
+  random and they share one schedule — the head looks at a whole new point
+  each interval instead of twitching one axis at a time.
+- Recording a manual performance (drag the trackpad) as a timestamped
+  sequence, then saving and looping it back — both axes and the relay's state
+  are captured and replayed together. Up to 6min40s per recording.
 - An **autostart** setting: on every power-up/reset, the configured pattern
   or saved sequence starts looping automatically with no user interaction,
   because it's applied *before* WiFi/the web server come up.
@@ -32,7 +36,8 @@ environment (`seeed_xiao_esp32c3` or `seeed_xiao_esp32s3`) when building/flashin
 | | XIAO ESP32C3 | XIAO ESP32S3 |
 |---|---|---|
 | Power | USB-C (5V from host/charger) | USB-C (5V from host/charger) |
-| Servo signal | **pin D10 (GPIO10)** → servo signal wire | **pin D10 (GPIO9)** → servo signal wire |
+| Servo X (pan) | **pin D10 (GPIO10)** → servo signal wire | **pin D10 (GPIO9)** → servo signal wire |
+| Servo Y (tilt) | **pin D3 (GPIO5)** → servo signal wire | **pin D3 (GPIO4)** → servo signal wire |
 | Relay / light | **pin D7 (GPIO20)** → relay module IN | **pin D7 (GPIO44)** → relay module IN |
 | Flash / RAM | 4MB / ~400KB SRAM | 8MB / ~512KB SRAM |
 
@@ -116,25 +121,26 @@ to finish verification.
 
 Three tabs, reachable from the bottom nav:
 
-- **Manual** — jog slider (live, ~25 Hz over WebSocket) with a Light toggle
-  for the D7 relay beside it, + pattern picker with generated parameter fields
-  and Start/Stop. The slider's range and the pattern forms' angle fields both
-  follow the servo calibration set in Settings.
+- **Manual** — XY trackpad (live, ~25 Hz over WebSocket) with a Light toggle
+  for the D7 relay beside it, + a pattern picker per axis with generated
+  parameter fields and Start/Stop. The pad's extents and the pattern forms'
+  angle fields both follow the per-axis calibration set in Settings.
 
   <img src="images/webui-manual.png" alt="Manual tab: jog slider and pattern picker" width="300">
 
-- **Record** — start/stop recording (captures the servo's position *and* the
-  relay's state at a fixed 20 Hz while you jog it), live trace, save/discard,
+- **Record** — start/stop recording (captures both servo axes *and* the
+  relay's state at a fixed 20 Hz while you aim the head), live trace with one
+  line per axis, save/discard,
   and play/stop the saved sequence on a loop. Playback drives the light from
   the recording just as it drives the servo. The trace plots both: the servo
-  angle as a line, and the light as a solid lane along the bottom (with a
+  axes as two lines, and the light as a solid lane along the bottom (with a
   faint wash over the motion it happened during), so you can see at a glance
   which part of a take was lit.
 
   <img src="images/webui-record.png" alt="Record tab: recording controls and saved sequence" width="300">
 
-- **Settings** — AP SSID/password, servo calibration (including **Invert
-  direction**, for a servo mounted mirrored/reversed relative to its
+- **Settings** — AP SSID/password, per-axis servo calibration (including
+  **Invert direction**, for a servo mounted mirrored/reversed relative to its
   calibrated min/max angle), relay polarity (**Active low**, for the
   opto-isolated relay boards that switch closed on a low input), autostart
   enable/target (pattern or sequence) with its own parameter fields, and a
@@ -254,13 +260,15 @@ rather than misbehave.
   (`Preferences`, versioned blob — a magic/version mismatch falls back to
   factory defaults instead of crashing).
 - Each recorded sequence lives in LittleFS at `/seq/<name>.bin` (12-byte
-  header + up to 12000 points of `{t_ms, angle*10, flags}`, i.e. up to 10
-  minutes at the 20 Hz capture rate — a board can hold several, named, picked
+  header + up to 8000 points of `{t_ms, x*10, y*10, flags}`, i.e. up to
+  6min40s at the 20 Hz capture rate — a board can hold several, named, picked
   for autostart or manual playback). It's only written on explicit **Save**,
-  never per-sample, to avoid flash wear. The relay state rides in a `flags`
-  byte that fits in the padding the point struct already carried, so it costs
-  neither RAM nor file size, and sequences recorded before it existed still
-  load (their light simply stays off).
+  never per-sample, to avoid flash wear. A point is 12 bytes; when the Y axis
+  was added the point count came down from 12000 so the fixed buffer stayed at
+  the same 96KB rather than eating another 48KB of the C3's RAM. Sequences
+  recorded by older firmware still load: their X and light tracks replay as
+  before, and tilt is left alone rather than driven somewhere the recording
+  never described.
 
 ## Known limitations / risks
 

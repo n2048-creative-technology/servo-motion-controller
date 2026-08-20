@@ -63,7 +63,8 @@ void NetworkLink::loopTick(uint32_t now) {
     NetPacket pkt;
     pkt.type = NET_PACKET_TYPE_HELLO;
     pkt.nodeId = nodeId_;
-    pkt.angleDeg = localAngle_;
+    pkt.angleX = localX_;
+    pkt.angleY = localY_;
     pkt.relayOn = localRelay_ ? 1 : 0;
     esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
   } else if (mode_ == OperatingMode::MASTER) {
@@ -102,38 +103,56 @@ void NetworkLink::loopTick(uint32_t now) {
   }
 }
 
-bool NetworkLink::transmitCommand(uint8_t targetNode, float angleDeg, bool relayOn) {
+bool NetworkLink::transmitCommand(uint8_t targetNode, float angleX, float angleY, bool relayOn) {
   NetPacket pkt;
   pkt.type = NET_PACKET_TYPE_CMD;
   pkt.targetNode = targetNode;
-  pkt.angleDeg = angleDeg;
+  pkt.angleX = angleX;
+  pkt.angleY = angleY;
   pkt.relayOn = relayOn ? 1 : 0;
   pkt.sessionId = sessionId_;
   pkt.seq = nextSeq_++;
   return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
 }
 
-bool NetworkLink::sendCommand(uint8_t targetNode, float angleDeg, bool relayOn) {
+bool NetworkLink::sendCommand(uint8_t targetNode, float angleX, float angleY, bool relayOn) {
   if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
-  const bool ok = transmitCommand(targetNode, angleDeg, relayOn);
-  if (ok) recordLastCommand(targetNode, angleDeg, relayOn, millis());
+  const bool ok = transmitCommand(targetNode, angleX, angleY, relayOn);
+  if (ok) recordLastCommand(targetNode, angleX, angleY, relayOn, millis());
   return ok;
 }
 
 bool NetworkLink::lastRelayFor(uint8_t targetNode) const {
-  for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
-    if (lastCommands_[i].inUse && lastCommands_[i].targetNode == targetNode) {
-      return lastCommands_[i].relayOn;
-    }
-  }
-  return false;
+  const LastCommand *cmd = findLastCommand(targetNode);
+  return cmd ? cmd->relayOn : false;
 }
 
-void NetworkLink::recordLastCommand(uint8_t targetNode, float angleDeg, bool relayOn, uint32_t now) {
+float NetworkLink::lastXFor(uint8_t targetNode) const {
+  const LastCommand *cmd = findLastCommand(targetNode);
+  return cmd ? cmd->angleX : SERVO_DEFAULT_CENTER_ANGLE;
+}
+
+float NetworkLink::lastYFor(uint8_t targetNode) const {
+  const LastCommand *cmd = findLastCommand(targetNode);
+  return cmd ? cmd->angleY : SERVO_DEFAULT_CENTER_ANGLE;
+}
+
+const LastCommand *NetworkLink::findLastCommand(uint8_t targetNode) const {
+  for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
+    if (lastCommands_[i].inUse && lastCommands_[i].targetNode == targetNode) {
+      return &lastCommands_[i];
+    }
+  }
+  return nullptr;
+}
+
+void NetworkLink::recordLastCommand(uint8_t targetNode, float angleX, float angleY, bool relayOn,
+                                    uint32_t now) {
   int freeSlot = -1;
   for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
     if (lastCommands_[i].inUse && lastCommands_[i].targetNode == targetNode) {
-      lastCommands_[i].angleDeg = angleDeg;
+      lastCommands_[i].angleX = angleX;
+      lastCommands_[i].angleY = angleY;
       lastCommands_[i].relayOn = relayOn;
       lastCommands_[i].lastSentMs = now;
       return;
@@ -145,7 +164,8 @@ void NetworkLink::recordLastCommand(uint8_t targetNode, float angleDeg, bool rel
   // NET_MAX_LAST_COMMANDS aren't expected in practice (one per Node/broadcast).
   const int slot = freeSlot >= 0 ? freeSlot : 0;
   lastCommands_[slot].targetNode = targetNode;
-  lastCommands_[slot].angleDeg = angleDeg;
+  lastCommands_[slot].angleX = angleX;
+  lastCommands_[slot].angleY = angleY;
   lastCommands_[slot].relayOn = relayOn;
   lastCommands_[slot].lastSentMs = now;
   lastCommands_[slot].inUse = true;
@@ -209,17 +229,19 @@ void NetworkLink::resendDueCommands(uint32_t now) {
     LastCommand &cmd = lastCommands_[i];
     if (!cmd.inUse) continue;
     if (now - cmd.lastSentMs >= NET_CMD_RESEND_INTERVAL_MS) {
-      transmitCommand(cmd.targetNode, cmd.angleDeg, cmd.relayOn);
+      transmitCommand(cmd.targetNode, cmd.angleX, cmd.angleY, cmd.relayOn);
       cmd.lastSentMs = now;
     }
   }
 }
 
-void NetworkLink::recordHello(uint8_t fromNodeId, float angleDeg, bool relayOn, uint32_t now) {
+void NetworkLink::recordHello(uint8_t fromNodeId, float angleX, float angleY, bool relayOn,
+                              uint32_t now) {
   int freeSlot = -1;
   for (uint8_t i = 0; i < NET_MAX_TRACKED_NODES; i++) {
     if (knownNodes_[i].inUse && knownNodes_[i].id == fromNodeId) {
-      knownNodes_[i].angleDeg = angleDeg;
+      knownNodes_[i].angleX = angleX;
+      knownNodes_[i].angleY = angleY;
       knownNodes_[i].relayOn = relayOn;
       knownNodes_[i].lastSeenMs = now;
       return;
@@ -229,7 +251,8 @@ void NetworkLink::recordHello(uint8_t fromNodeId, float angleDeg, bool relayOn, 
   if (freeSlot >= 0) {
     KnownNode &slot = knownNodes_[freeSlot];
     slot.id = fromNodeId;
-    slot.angleDeg = angleDeg;
+    slot.angleX = angleX;
+    slot.angleY = angleY;
     slot.relayOn = relayOn;
     slot.lastSeenMs = now;
     slot.inUse = true;
@@ -254,10 +277,12 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
   const uint32_t now = millis();
 
   if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_HELLO) {
-    recordHello(pkt.nodeId, pkt.angleDeg, pkt.relayOn != 0, now);
+    recordHello(pkt.nodeId, pkt.angleX, pkt.angleY, pkt.relayOn != 0, now);
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_CMD) {
     if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
-    if (!isfinite(pkt.angleDeg)) return; // corrupted/garbage payload: never let this reach the servo
+    // Corrupted/garbage payload: never let this reach a servo. Both axes are
+    // checked, since one bad float would otherwise still be written.
+    if (!isfinite(pkt.angleX) || !isfinite(pkt.angleY)) return;
 
     // Reject anything older than the last command we already applied, so a
     // resend or retransmit that got delayed in transit can't yank the servo
@@ -271,7 +296,7 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     haveSession_ = true;
     lastSessionId_ = pkt.sessionId;
     lastAppliedSeq_ = pkt.seq;
-    if (nodeCommandCb_) nodeCommandCb_(pkt.angleDeg, pkt.relayOn != 0);
+    if (nodeCommandCb_) nodeCommandCb_(pkt.angleX, pkt.angleY, pkt.relayOn != 0);
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_START) {
     if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
     // Deferred to loopTick() — see the pendingSeqStart_/pendingSeqStop_

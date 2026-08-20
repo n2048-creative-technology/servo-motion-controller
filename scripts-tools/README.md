@@ -27,14 +27,15 @@ What it does:
 
 - Lists and connects to serial ports (115200 baud, matching the Master).
 - Polls the Master's known-node table (`{"cmd":"list"}`) every 2s and shows
-  it in a table — angle, light state, and how long ago each Node last
+  it in a table — pan, tilt, light state, and how long ago each Node last
   heartbeat-ed.
 - Select one or more rows in that table (ctrl/shift-click) to target them,
   or check **All nodes** to broadcast; a fallback node-ID field covers
   targeting a Node that hasn't reported in yet.
-- A Send button for one-shot moves, plus an optional "live jog" mode that
-  streams the angle slider at ~25 Hz while dragging (same throttle the web
-  UI's jog slider uses).
+- X/Y entry boxes and a square **XY pad** — click or drag to aim a node's
+  pan/tilt head (left/right is pan, up is higher tilt, matching the web UI).
+  A Send button fires one-shot moves, plus an optional "live jog" mode that
+  streams the pad at ~25 Hz while dragging.
 - A **Light on (relay)** checkbox for the D7 relay output, sent with every
   command, plus **Apply Light Only** to switch the target(s)' light without
   moving anything (it re-sends each Node's own last reported angle — the
@@ -45,8 +46,8 @@ What it does:
 - A scrolling log of every line sent/received, for debugging.
 
 A multi-node selection is a client-side fan-out — the GUI just sends one
-`{"node": <id>, "angle": ..., "relay": ...}` line per selected Node in quick
-succession.
+`{"node": <id>, "x": ..., "y": ..., "relay": ...}` line per selected Node in
+quick succession.
 The wire protocol itself is unchanged; see the serial-protocol doc for the
 full command/reply reference.
 
@@ -74,9 +75,19 @@ Workflow:
    its raw axis values, handy for telling axes apart. There's no "select a
    controller" step; all connected ones are available for mapping
    simultaneously.
-3. Click **Learn Axis / Button…**, then move *only* the physical axis you
-   want to link — on *any* connected controller — for the ~4 seconds the
-   dialog is watching, **or press the button** you want to use for a Node's
+3. Click **Learn Axis / Button…**, then move the stick, axis or button you
+   want to link — on *any* connected controller — during the ~4 seconds the
+   dialog is watching.
+
+   **Move a whole stick** (both its axes) and it's learned as a pair: one
+   dialog assigns both halves to one node's X (pan) and Y (tilt), with a
+   Swap checkbox if your stick's axes come through the other way round, an
+   Invert per axis (Y starts inverted, since pushing a stick down usually
+   means tilting down), and a separate angle range for each. That's one step
+   per pan/tilt head instead of two.
+
+   Move a single axis and it's learned on its own — the form then asks which
+   servo axis it drives. **Press a button** instead and it maps to a Node's
    light (a button press wins immediately and ends the watch early: axes
    idle with noise and drift, so a button going down is the unambiguous
    signal of intent). It watches every axis and button of every controller
@@ -119,31 +130,34 @@ Workflow:
 4. Check **Stream mapped axes to their Nodes** to start sending — every
    mapped axis, across all connected controllers, is recalculated ~25 Hz and
    only resent when it moves more than ~0.2°, to avoid flooding the link
-   while idle. Button-mapped lights are sent the moment they change, at the
-   Node's last commanded angle — a light-only Node (button mapped, no axis)
-   works fine and simply holds position.
-5. **Start Recording** captures every mapped Node's computed angle *and*
+   while idle. Each node gets **one command per tick carrying both of its
+   axes and its light**, never one per axis — the firmware needs them
+   together so a head can't act on half a move. A channel you haven't mapped
+   for a node (tilt but no pan, a light-only node) is filled with wherever
+   that node already is, so it holds rather than snapping.
+5. **Start Recording** captures every mapped Node's computed pan, tilt *and*
    light state (not the raw axis/button — the physical controller's identity
    is irrelevant on playback) at the same ~25 Hz, timestamped from recording
-   start. **Save Recording As…** writes it to CSV: a `t_ms` column, a
-   `node_<id>` angle column per axis-mapped Node, and a `node_<id>_light`
-   column (`1`/`0`) per button-mapped Node, e.g.:
+   start. **Save Recording As…** writes it to CSV: a `t_ms` column plus
+   `node_<id>_x`, `node_<id>_y` and `node_<id>_light` columns for whichever
+   channels that Node actually has, e.g.:
 
    ```csv
-   t_ms,node_3,node_3_light,node_7
-   0,135.0,0,90.0
-   40,138.2,1,90.0
-   80,141.0,1,91.5
+   t_ms,node_3_x,node_3_y,node_3_light,node_7_x
+   0,135.0,90.0,0,200.0
+   40,138.2,92.5,1,201.0
+   80,141.0,95.0,1,202.0
    ```
 
-   A Node only gets a `_light` column if a button was actually mapped to it,
-   so a recording made without any button mapping produces exactly the same
-   angle-only file it always did. Older angle-only CSVs still load and play,
-   with every light simply off.
+   A Node only gets the columns it has data for, so a pan-only mapping
+   doesn't write a column of blanks for tilt. Older CSVs still load and
+   play: a bare `node_<id>` column is read as that Node's pan (the servo
+   those recordings were made with), tilt is left alone, and a missing
+   `_light` column simply means the light stays off.
 
 6. **Load CSV…** + **Play** replays a recording by sending `{"node":
-   <id>, "angle": ..., "relay": ...}` — no controller needed at all, so a
-   captured performance, lighting included, can be replayed standalone.
+   <id>, "x": ..., "y": ..., "relay": ...}` — no controller needed at all, so
+   a captured performance, lighting included, can be replayed standalone.
    Lights are held (stepped) between samples rather than interpolated, so a
    relay never chatters at the sample rate. **Loop** repeats it; **Stop**
    cancels mid-playback. **Speed** (0.1–2.0, default 1.0) doesn't just scale
@@ -158,8 +172,8 @@ Workflow:
    just replaying it live: pick a source (the loaded CSV or your last live
    recording), a Node ID present in it (or check **Upload to all Nodes
    present in source** to push every Node's own column to its Node at
-   once), and a name. Each Node only ever receives its own columns — its
-   angle track and, if the recording has one, its light track — never
+   once), and a name. Each Node only ever receives its own columns — its pan,
+   tilt and light tracks, whichever of them the recording has — never
    another Node's data, streamed through the Master at real-time pace (via
    `remote_record_start`/`remote_record_stop`, see
    [../docs/serial-protocol.md](../docs/serial-protocol.md)). Because the
@@ -179,7 +193,8 @@ Workflow:
    saves its sequence and can then loop it on every
    boot via its own Settings → Autostart, completely standalone — no PC,
    Master, or controller needed afterward. Long recordings (over 10
-   minutes, a Node's own capacity) are truncated with a warning per Node.
+   6min40s, a Node's own capacity now that each recorded point carries both
+   axes) are truncated with a warning per Node.
    The start request is sent redundantly (a lost one is otherwise invisible
    — the Node still moves on every point of the stream that follows
    regardless of whether it actually started recording) and a failed/lost
@@ -213,10 +228,10 @@ Workflow:
    **Clear Node's saved recordings before uploading** in the Upload dialog,
    or use the **Clear All** button in that Node's own web UI (Record tab).
 
-The axis-mapping math, CSV round-trip (including light columns and the
-older angle-only files), button toggle/momentary edge handling, mapping-file
-compatibility, and upload data-extraction/resampling logic are all
-unit-tested, and the window itself has been launched and visually confirmed
+The axis-mapping math, CSV round-trip (X/Y/light columns plus both older
+formats), button toggle/momentary edge handling, mapping-file compatibility,
+stick-pair detection, and upload data-extraction/resampling logic are all
+unit-tested, both GUIs' widget trees are built and rendered as a smoke test, and the window itself has been launched and visually confirmed
 on a real display with two real controllers connected simultaneously (an
 Xbox pad and a Logitech joystick) — but the Upload to Node… flow's actual
 PC → Master → Node round trip hasn't been exercised against real hardware in

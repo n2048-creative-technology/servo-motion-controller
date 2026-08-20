@@ -36,10 +36,10 @@ struct PatternParams {
   float randMaxSpeedDps = PATTERN_RANDOM_DEFAULT_MAX_SPEED_DPS;
 };
 
-// RANDOM's per-run state. Unlike every other shape — a pure function of
-// (params, phase) — RANDOM has to remember where the current move started,
-// where it's heading and when the next one is due, so PlaybackEngine owns one
-// of these and resets it each time a RANDOM pattern starts.
+// RANDOM's per-run state, one per axis. Unlike every other shape — a pure
+// function of (params, phase) — RANDOM has to remember where the current move
+// started, where it's heading and when the next one is due, so PlaybackEngine
+// owns these and resets them each time a RANDOM pattern starts.
 struct RandomPatternState {
   bool initialized = false;
   float fromDeg = 0.0f;      // where the current move started
@@ -47,6 +47,15 @@ struct RandomPatternState {
   uint32_t moveStartMs = 0;  // elapsed-time stamp the current move began at
   uint32_t moveDurationMs = 0;
   uint32_t nextMoveMs = 0;   // elapsed-time stamp the next move begins at
+};
+
+// Both axes set to RANDOM at once: they share one schedule so the head picks
+// a whole new (X, Y) point each interval and travels there as one move,
+// rather than each axis wandering off on its own timer — which looks like two
+// independent twitches instead of a head looking somewhere new.
+struct Random2DState {
+  RandomPatternState x;
+  RandomPatternState y;
 };
 
 namespace PatternEngine {
@@ -73,6 +82,15 @@ float computeRandomAngle(const PatternParams &params, RandomPatternState &state,
 // Puts `state` back to "about to make its first move", starting from wherever
 // the servo currently sits so the opening move is as smooth as every later one.
 void resetRandom(RandomPatternState &state, float currentAngleDeg);
+
+// Both axes RANDOM together: picks a new (X, Y) target on one shared
+// interval, easing both over the same duration (the slower axis sets it, so
+// neither exceeds its own speed cap) so the head travels in a straight line
+// to the new point instead of dog-legging.
+void resetRandom2D(Random2DState &state, float currentX, float currentY);
+void computeRandom2D(const PatternParams &paramsX, const PatternParams &paramsY, Random2DState &state,
+                     uint32_t t_ms, float minX, float maxX, float minY, float maxY, float *outX,
+                     float *outY);
 
 // Returns false and clamps unknown types to a safe default if invalid.
 bool isValidType(uint8_t rawType);

@@ -112,7 +112,8 @@ void SerialBridge::handleLine(const char *line) {
       if (!known[i].inUse) continue;
       JsonObject n = nodes.add<JsonObject>();
       n["id"] = known[i].id;
-      n["angle"] = known[i].angleDeg;
+      n["x"] = known[i].angleX;
+      n["y"] = known[i].angleY;
       n["relay"] = known[i].relayOn;
       n["age_ms"] = now - known[i].lastSeenMs;
     }
@@ -122,13 +123,17 @@ void SerialBridge::handleLine(const char *line) {
     return;
   }
 
-  if (!doc["node"].is<int>() || !doc["angle"].is<float>()) {
-    Serial.println("{\"ok\":false,\"error\":\"expected node+angle or cmd\"}");
+  // A move names the node and at least one axis. "x"/"y" are the current
+  // spelling; "angle" is still accepted as X so scripts written for the
+  // single-servo firmware keep working.
+  const bool hasX = doc["x"].is<float>() || doc["angle"].is<float>();
+  const bool hasY = doc["y"].is<float>();
+  if (!doc["node"].is<int>() || (!hasX && !hasY)) {
+    Serial.println("{\"ok\":false,\"error\":\"expected node+x/y (or node+angle) or cmd\"}");
     return;
   }
 
   int node = doc["node"].as<int>();
-  float angle = doc["angle"].as<float>();
   if (node < 0 || node > NET_NODE_ID_MAX) {
     Serial.println("{\"ok\":false,\"error\":\"node out of range\"}");
     return;
@@ -143,7 +148,15 @@ void SerialBridge::handleLine(const char *line) {
   const bool relayOn =
       doc["relay"].is<bool>() ? doc["relay"].as<bool>() : network_->lastRelayFor(target);
 
-  bool ok = network_->sendCommand(target, angle, relayOn);
+  // An axis left out of the command holds its last commanded position rather
+  // than snapping to some default — so a tool that only drives pan never
+  // disturbs tilt, and vice versa.
+  const float x = doc["x"].is<float>()      ? doc["x"].as<float>()
+                  : doc["angle"].is<float>() ? doc["angle"].as<float>()
+                                             : network_->lastXFor(target);
+  const float y = hasY ? doc["y"].as<float>() : network_->lastYFor(target);
+
+  bool ok = network_->sendCommand(target, x, y, relayOn);
   Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
 }
 

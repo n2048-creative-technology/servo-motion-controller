@@ -40,26 +40,47 @@
     </div>
 
     <div class="card">
-      <h2>Jog</h2>
+      <h2>Position</h2>
       <div class="jogrow">
-        <input id="jogSlider" type="range" min="0" max="270" step="0.5" value="135" class="jog">
+        <div id="pad" class="pad" role="application" aria-label="Pan and tilt trackpad">
+          <div id="padGuideV" class="padguide padguide-v"></div>
+          <div id="padGuideH" class="padguide padguide-h"></div>
+          <div id="padDot" class="paddot"></div>
+        </div>
         <label class="switch" title="Relay output on D7">
           <input id="relayToggle" type="checkbox">
           <span class="switchtrack"></span>
           <span class="switchlabel">Light</span>
         </label>
       </div>
-      <div class="jogreadout"><span id="jogValue">135.0</span>&deg;</div>
-      <p class="hint" id="jogRangeHint">Range follows the servo calibration in Settings.</p>
+      <div class="jogreadout">
+        <span class="axislabel">X</span><span id="padXValue">135.0</span>&deg;
+        <span class="axissep"></span>
+        <span class="axislabel">Y</span><span id="padYValue">135.0</span>&deg;
+      </div>
+      <p class="hint" id="padRangeHint">Drag to aim the head. Ranges follow the servo calibration in Settings.</p>
     </div>
 
     <div class="card">
       <h2>Pattern</h2>
-      <label class="field">
-        <span>Shape</span>
-        <select id="patternType"></select>
-      </label>
-      <div id="patternParams" class="paramgrid"></div>
+      <p class="hint">Each axis runs its own shape independently. Set both to Random and they share one
+        schedule, so the head picks a whole new point to look at each interval.</p>
+      <div class="axisblock">
+        <h3>X &mdash; pan (D10)</h3>
+        <label class="field">
+          <span>Shape</span>
+          <select id="patternTypeX"></select>
+        </label>
+        <div id="patternParamsX" class="paramgrid"></div>
+      </div>
+      <div class="axisblock">
+        <h3>Y &mdash; tilt (D3)</h3>
+        <label class="field">
+          <span>Shape</span>
+          <select id="patternTypeY"></select>
+        </label>
+        <div id="patternParamsY" class="paramgrid"></div>
+      </div>
       <div class="btnrow">
         <button id="patternStart" class="btn btn-go">Start Loop</button>
         <button id="patternStop" class="btn btn-stop">Stop</button>
@@ -70,7 +91,7 @@
   <section id="tab-record" class="tab">
     <div class="card">
       <h2>Record Motion</h2>
-      <p class="hint">Start recording, then move the servo with the Manual jog slider on this or another tab. Samples are captured automatically while recording &mdash; including the Light toggle's state, which is replayed with the motion.</p>
+      <p class="hint">Start recording, then aim the head with the Manual trackpad on this or another tab. Samples are captured automatically while recording &mdash; including the Light toggle's state, which is replayed with the motion.</p>
       <div class="recstate">
         <span id="recDot" class="dot dot-off"></span>
         <span id="recLabel">idle</span>
@@ -78,7 +99,8 @@
       </div>
       <canvas id="recCanvas" width="600" height="120" class="trace"></canvas>
       <div class="tracelegend">
-        <span><i class="sw-angle"></i>servo angle</span>
+        <span><i class="sw-x"></i>X (pan)</span>
+        <span><i class="sw-y"></i>Y (tilt)</span>
         <span><i class="sw-light"></i>light on</span>
       </div>
       <div class="btnrow">
@@ -127,17 +149,36 @@
 
     <div class="card">
       <h2>Servo Calibration</h2>
-      <div class="paramgrid">
-        <label class="field"><span>Min pulse (&micro;s)</span><input id="calMinUs" type="number" step="1"></label>
-        <label class="field"><span>Max pulse (&micro;s)</span><input id="calMaxUs" type="number" step="1"></label>
-        <label class="field"><span>Min angle (&deg;)</span><input id="calMinAngle" type="number" step="0.5"></label>
-        <label class="field"><span>Max angle (&deg;)</span><input id="calMaxAngle" type="number" step="0.5"></label>
-        <label class="field"><span>Center angle (&deg;)</span><input id="calCenterAngle" type="number" step="0.5"></label>
+      <p class="hint">The two axes calibrate separately &mdash; a tilt servo usually has a different
+        mechanical range from the pan servo.</p>
+      <div class="axisblock">
+        <h3>X &mdash; pan, pin <code id="calXPin">D10</code></h3>
+        <div class="paramgrid">
+          <label class="field"><span>Min pulse (&micro;s)</span><input id="calXMinUs" type="number" step="1"></label>
+          <label class="field"><span>Max pulse (&micro;s)</span><input id="calXMaxUs" type="number" step="1"></label>
+          <label class="field"><span>Min angle (&deg;)</span><input id="calXMinAngle" type="number" step="0.5"></label>
+          <label class="field"><span>Max angle (&deg;)</span><input id="calXMaxAngle" type="number" step="0.5"></label>
+          <label class="field"><span>Center angle (&deg;)</span><input id="calXCenterAngle" type="number" step="0.5"></label>
+        </div>
+        <label class="field checkfield">
+          <input id="calXInvert" type="checkbox">
+          <span>Invert direction</span>
+        </label>
       </div>
-      <label class="field checkfield">
-        <input id="calInvert" type="checkbox">
-        <span>Invert direction</span>
-      </label>
+      <div class="axisblock">
+        <h3>Y &mdash; tilt, pin <code id="calYPin">D3</code></h3>
+        <div class="paramgrid">
+          <label class="field"><span>Min pulse (&micro;s)</span><input id="calYMinUs" type="number" step="1"></label>
+          <label class="field"><span>Max pulse (&micro;s)</span><input id="calYMaxUs" type="number" step="1"></label>
+          <label class="field"><span>Min angle (&deg;)</span><input id="calYMinAngle" type="number" step="0.5"></label>
+          <label class="field"><span>Max angle (&deg;)</span><input id="calYMaxAngle" type="number" step="0.5"></label>
+          <label class="field"><span>Center angle (&deg;)</span><input id="calYCenterAngle" type="number" step="0.5"></label>
+        </div>
+        <label class="field checkfield">
+          <input id="calYInvert" type="checkbox">
+          <span>Invert direction</span>
+        </label>
+      </div>
       <div class="btnrow">
         <button id="calSave" class="btn btn-primary">Save Calibration</button>
       </div>
@@ -169,11 +210,24 @@
           <option value="sequence">Recorded sequence</option>
         </select>
       </label>
-      <label class="field" id="asPatternTypeField">
-        <span>Pattern shape</span>
-        <select id="asPatternType"></select>
-      </label>
-      <div id="asPatternParams" class="paramgrid"></div>
+      <div id="asPatternFields">
+        <div class="axisblock">
+          <h3>X &mdash; pan</h3>
+          <label class="field">
+            <span>Pattern shape</span>
+            <select id="asPatternTypeX"></select>
+          </label>
+          <div id="asPatternParamsX" class="paramgrid"></div>
+        </div>
+        <div class="axisblock">
+          <h3>Y &mdash; tilt</h3>
+          <label class="field">
+            <span>Pattern shape</span>
+            <select id="asPatternTypeY"></select>
+          </label>
+          <div id="asPatternParamsY" class="paramgrid"></div>
+        </div>
+      </div>
       <label class="field" id="asSequenceField">
         <span>Sequence</span>
         <select id="asSequenceName"></select>
@@ -201,8 +255,8 @@
       <div id="netMasterInfo" class="hint">
         Connect this board to a PC over USB serial at 115200 baud and send one JSON object per line, e.g. <code>{"node":3,"angle":120.5}</code> (<code>node:0</code> = all nodes), or <code>{"cmd":"list"}</code> to list known nodes. See <code>docs/serial-protocol.md</code>.
         <table id="netNodesTable" class="nodetable">
-          <thead><tr><th>Node ID</th><th>Angle</th><th>Light</th><th>Last seen</th></tr></thead>
-          <tbody id="netNodesBody"><tr><td colspan="4">no nodes heard from yet</td></tr></tbody>
+          <thead><tr><th>Node</th><th>X</th><th>Y</th><th>Light</th><th>Last seen</th></tr></thead>
+          <tbody id="netNodesBody"><tr><td colspan="5">no nodes heard from yet</td></tr></tbody>
         </table>
       </div>
       <div class="btnrow">

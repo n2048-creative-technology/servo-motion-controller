@@ -49,6 +49,10 @@ NODE_POLL_INTERVAL_MS = 2000
 LEARN_DURATION_MS = 4000
 LEARN_POLL_INTERVAL_MS = 30
 MIN_LEARN_RANGE = 0.15  # raw axis units; below this, "no clear movement" wins
+# For a two-axis stick to be learned as a pair, the second axis must have moved
+# at least this fraction of the first. Loose enough that a rolled stick counts,
+# tight enough that cross-talk while sweeping one axis doesn't.
+STICK_PAIR_MIN_RATIO = 0.4
 ANGLE_SEND_EPSILON = 0.2  # degrees; skip a resend below this delta
 
 # A Node's light needs an angle to travel with (the firmware carries relay
@@ -64,8 +68,9 @@ PLAYBACK_SPEED_MIN = 0.1
 PLAYBACK_SPEED_MAX = 2.0
 
 # Must match the firmware's Config.h: MAX_SEQ_POINTS * RECORD_INTERVAL_MS —
-# how long a Node's own recording buffer can hold (600s/10min at 12000 points/50ms).
-UPLOAD_MAX_DURATION_MS = 600000
+# how long a Node's own recording buffer can hold (400s/6min40s at 8000
+# points/50ms; the count came down when each point gained its Y axis).
+UPLOAD_MAX_DURATION_MS = 400000
 UPLOAD_ACK_TIMEOUT_MS = 4000  # how long to wait for a SEQ_ACK before retrying the stop-and-save once
 
 # SEQ_START has no delivery guarantee and, unlike an ordinary move command,
@@ -100,13 +105,13 @@ UPLOAD_CLEAR_SETTLE_MS = 300
 UPLOAD_BATCH_STAGGER_MS = 150
 
 # Must match firmware's SequenceStore.cpp FileHeader (12 bytes) and
-# SequencePoint (8 bytes: uint32_t t_ms + int16_t angle_decideg, padded) —
+# SequencePoint (12 bytes: uint32_t t_ms + int16_t x + int16_t y + flags) —
 # used to estimate a recording's on-Node file size for the free-space
 # preflight check below. RECORD_INTERVAL_MS must match Config.h: a Node
 # captures at that cadence regardless of how densely we stream points to it,
 # so the estimate is based on wall-clock duration, not our own point count.
 SEQ_FILE_HEADER_BYTES = 12
-SEQ_POINT_BYTES = 8
+SEQ_POINT_BYTES = 12
 NODE_RECORD_INTERVAL_MS = 50
 
 # How long to wait for a space_reply before giving up and uploading anyway
@@ -143,8 +148,10 @@ def sanitize_sequence_name(name):
 
 
 class AxisMapping:
-    """One learned (controller, axis) -> Node link, with its raw and output
-    angle ranges. `controller_guid` (SDL/pygame's Joystick.get_guid(), stable
+    """One learned (controller, axis) -> (Node, servo axis) link, with its raw
+    and output angle ranges. `target_axis` is "x" (pan, D10) or "y" (tilt, D3):
+    a node is a pan/tilt head, so a stick's two axes usually become two of
+    these pointed at the same node. `controller_guid` (SDL/pygame's Joystick.get_guid(), stable
     across reconnects and USB port/order changes) is what actually resolves
     to a live pygame.joystick.Joystick at runtime; `controller_name` is a
     display-only label carried alongside it for the UI and for reattaching a
@@ -153,7 +160,7 @@ class AxisMapping:
 
     def __init__(
         self, controller_guid, controller_name, axis_index, raw_min, raw_max, node_id, angle_min, angle_max,
-        invert=False,
+        invert=False, target_axis="x",
     ):
         self.controller_guid = controller_guid
         self.controller_name = controller_name
@@ -164,6 +171,7 @@ class AxisMapping:
         self.angle_min = angle_min
         self.angle_max = angle_max
         self.invert = invert
+        self.target_axis = target_axis if target_axis in ("x", "y") else "x"
         self.last_sent_angle = None
 
     def compute_angle(self, raw_value):
@@ -176,7 +184,8 @@ class AxisMapping:
 
     def label(self):
         controller = self.controller_name or "unknown controller"
-        return f"{controller} axis {self.axis_index} -> Node {self.node_id} [{self.angle_min:.0f}-{self.angle_max:.0f}°]"
+        return (f"{controller} axis {self.axis_index} -> Node {self.node_id} "
+                f"{self.target_axis.upper()} [{self.angle_min:.0f}-{self.angle_max:.0f}°]")
 
     def to_dict(self):
         return {
@@ -190,6 +199,7 @@ class AxisMapping:
             "angle_min": self.angle_min,
             "angle_max": self.angle_max,
             "invert": self.invert,
+            "target_axis": self.target_axis,
         }
 
     @classmethod
@@ -204,6 +214,9 @@ class AxisMapping:
             angle_min=float(d["angle_min"]),
             angle_max=float(d["angle_max"]),
             invert=bool(d.get("invert", False)),
+            # Mappings saved before nodes had two axes drove the one servo
+            # there was, which is now X.
+            target_axis=d.get("target_axis", "x"),
         )
 
 
@@ -297,74 +310,80 @@ def load_mapping_config(path):
     return mappings
 
 
-# Recorded rows are (t_ms, {node_id: angle}, {node_id: light_bool}). The two
-# dicts are kept separate rather than merged into one per-node record because
-# a Node can legitimately have one without the other: an axis mapped but no
-# button (motion, no light track) or a button but no axis (a light-only Node).
+# Recorded rows are (t_ms, xs, ys, lights) — three dicts keyed by node id.
+# They're kept as separate channels rather than one record per node because a
+# node can legitimately have any subset: an axis mapped to pan only, a button
+# but no stick (light-only), and so on. A channel a node has no mapping for is
+# simply absent, and stays absent through save/load/resample/playback.
 CSV_LIGHT_SUFFIX = "_light"
+CSV_X_SUFFIX = "_x"
+CSV_Y_SUFFIX = "_y"
 
 
 def load_csv_rows(path):
-    """Parse a recorded CSV back into [(t_ms, {node_id: angle}, {node_id: light}), ...].
+    """Parse a recorded CSV into [(t_ms, xs, ys, lights), ...].
 
-    Reads both the current format (a `node_N` angle column plus an optional
-    `node_N_light` column per Node) and the older angle-only files written
-    before lights existed — those load with every light off."""
+    Reads the current format (`node_N_x`, `node_N_y`, `node_N_light`), the
+    previous one (`node_N` angle + optional `node_N_light`), and the original
+    angle-only files. A bare `node_N` column is read as that node's X (pan),
+    which is the servo those recordings were made with."""
     with open(path, newline="") as f:
         reader = csv.reader(f)
         header = next(reader)
-        angle_cols = {}  # column index -> node id
-        light_cols = {}
+        x_cols, y_cols, light_cols = {}, {}, {}
         for idx, col in enumerate(header[1:], start=1):
             if not col.startswith("node_"):
                 continue
             rest = col[len("node_"):]
             if rest.endswith(CSV_LIGHT_SUFFIX):
                 light_cols[idx] = int(rest[: -len(CSV_LIGHT_SUFFIX)])
+            elif rest.endswith(CSV_Y_SUFFIX):
+                y_cols[idx] = int(rest[: -len(CSV_Y_SUFFIX)])
+            elif rest.endswith(CSV_X_SUFFIX):
+                x_cols[idx] = int(rest[: -len(CSV_X_SUFFIX)])
             else:
-                angle_cols[idx] = int(rest)
+                x_cols[idx] = int(rest)  # pre-pan/tilt file: the one axis is X
         rows = []
         for row in reader:
             t_ms = int(float(row[0]))
-            angles = {
-                nid: float(row[i]) for i, nid in angle_cols.items() if i < len(row) and row[i] != ""
-            }
+            def floats(cols):
+                return {nid: float(row[i]) for i, nid in cols.items() if i < len(row) and row[i] != ""}
             lights = {
                 nid: row[i].strip().lower() in ("1", "true", "on")
                 for i, nid in light_cols.items()
                 if i < len(row) and row[i] != ""
             }
-            rows.append((t_ms, angles, lights))
+            rows.append((t_ms, floats(x_cols), floats(y_cols), lights))
     return rows
 
 
 def save_csv_rows(path, rows):
-    """Write [(t_ms, angles, lights), ...] in the shape load_csv_rows reads.
+    """Write [(t_ms, xs, ys, lights), ...] in the shape load_csv_rows reads.
 
-    A Node's `node_N_light` column is only emitted if that Node actually has
-    light data, so a recording made without any button mapping produces the
-    same angle-only file it always did."""
-    angle_ids = sorted({nid for _, angles, _ in rows for nid in angles})
-    light_ids = sorted({nid for _, _, lights in rows for nid in lights})
-    columns = []  # (node_id, is_light), ordered by node then angle-before-light
-    for nid in sorted(set(angle_ids) | set(light_ids)):
-        if nid in angle_ids:
-            columns.append((nid, False))
-        if nid in light_ids:
-            columns.append((nid, True))
+    A node only gets the columns it actually has data for, so a pan-only
+    recording doesn't carry a column of blanks for tilt."""
+    channels = [(CSV_X_SUFFIX, 1), (CSV_Y_SUFFIX, 2), (CSV_LIGHT_SUFFIX, 3)]
+    node_ids = sorted({nid for row in rows for ch in (1, 2, 3) for nid in row[ch]})
+
+    columns = []  # (node_id, row_index, suffix)
+    for nid in node_ids:
+        for suffix, idx in channels:
+            if any(nid in row[idx] for row in rows):
+                columns.append((nid, idx, suffix))
 
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            ["t_ms"] + [f"node_{nid}{CSV_LIGHT_SUFFIX if is_light else ''}" for nid, is_light in columns]
-        )
-        for t_ms, angles, lights in rows:
-            out = [t_ms]
-            for nid, is_light in columns:
-                if is_light:
-                    out.append("1" if lights.get(nid) else "0" if nid in lights else "")
+        writer.writerow(["t_ms"] + [f"node_{nid}{suffix}" for nid, _idx, suffix in columns])
+        for row in rows:
+            out = [row[0]]
+            for nid, idx, suffix in columns:
+                value = row[idx].get(nid)
+                if value is None:
+                    out.append("")
+                elif suffix == CSV_LIGHT_SUFFIX:
+                    out.append("1" if value else "0")
                 else:
-                    out.append(f"{angles[nid]:.1f}" if nid in angles else "")
+                    out.append(f"{value:.1f}")
             writer.writerow(out)
 
 
@@ -400,7 +419,7 @@ def _light_at(times, values, src_t):
 
 
 def resample_rows(rows, output_interval_ms, speed):
-    """Resample recorded (t_ms, {node_id: angle}, {node_id: light}) rows onto a fixed-cadence
+    """Resample recorded (t_ms, xs, ys, lights) rows onto a fixed-cadence
     output grid, so the actual send rate during playback stays close to
     `output_interval_ms` regardless of speed instead of just stretching or
     compressing the gaps between the original samples:
@@ -414,50 +433,45 @@ def resample_rows(rows, output_interval_ms, speed):
         send rate instead of bursting every original sample as fast as
         possible.
 
+    Angles interpolate; lights are held (stepped), mirroring the firmware.
     Always ends on the exact final recorded position, at every speed.
     """
     if not rows:
         return []
 
-    angle_ids = sorted({nid for _, angles, _ in rows for nid in angles})
-    light_ids = sorted({nid for _, _, lights in rows for nid in lights})
-
-    angle_timelines = {}
-    for nid in angle_ids:
-        pts = [(t, a[nid]) for t, a, _ in rows if nid in a]
-        angle_timelines[nid] = ([p[0] for p in pts], [p[1] for p in pts])
-
-    light_timelines = {}
-    for nid in light_ids:
-        pts = [(t, l[nid]) for t, _, l in rows if nid in l]
-        light_timelines[nid] = ([p[0] for p in pts], [p[1] for p in pts])
+    # channel index -> {node_id: (times, values)}
+    timelines = {}
+    for idx in (1, 2, 3):
+        node_ids = sorted({nid for row in rows for nid in row[idx]})
+        channel = {}
+        for nid in node_ids:
+            pts = [(row[0], row[idx][nid]) for row in rows if nid in row[idx]]
+            channel[nid] = ([p[0] for p in pts], [p[1] for p in pts])
+        timelines[idx] = channel
 
     duration_ms = rows[-1][0]
     output_duration_ms = max(0, int(duration_ms / speed))
 
     def sample_at(src_t):
-        angles = {}
-        for nid in angle_ids:
-            times, values = angle_timelines[nid]
-            v = _interp_channel(times, values, src_t)
-            if v is not None:
-                angles[nid] = v
-        lights = {}
-        for nid in light_ids:
-            times, values = light_timelines[nid]
-            v = _light_at(times, values, src_t)
-            if v is not None:
-                lights[nid] = v
-        return angles, lights
+        out = []
+        for idx in (1, 2, 3):
+            picker = _light_at if idx == 3 else _interp_channel
+            values = {}
+            for nid, (times, vals) in timelines[idx].items():
+                v = picker(times, vals, src_t)
+                if v is not None:
+                    values[nid] = v
+            out.append(values)
+        return out
 
     out_rows = []
     out_t = 0
     while out_t < output_duration_ms:
-        angles, lights = sample_at(out_t * speed)
-        out_rows.append((out_t, angles, lights))
+        xs, ys, lights = sample_at(out_t * speed)
+        out_rows.append((out_t, xs, ys, lights))
         out_t += output_interval_ms
-    angles, lights = sample_at(duration_ms)
-    out_rows.append((output_duration_ms, angles, lights))  # exact final position, always
+    xs, ys, lights = sample_at(duration_ms)
+    out_rows.append((output_duration_ms, xs, ys, lights))  # exact final position, always
     return out_rows
 
 
@@ -535,6 +549,30 @@ class LearnDialog(tk.Toplevel):
         else:
             self._finish_learn()
 
+    def _stick_candidate(self):
+        """Two axes on the *same* controller that both moved clearly: almost
+        always the two halves of one physical stick, which for a pan/tilt head
+        is what you actually want to map. Returns (guid, axisA, axisB) with the
+        pair in axis-index order, or None.
+
+        Requires the second axis to have moved a decent fraction of the first
+        (not just past the noise floor), so a deliberate one-axis sweep with a
+        little cross-talk still learns as a single axis."""
+        spans = sorted(((self.maxs[k] - self.mins[k], k) for k in self.mins), reverse=True)
+        if len(spans) < 2:
+            return None
+        best_span, (best_guid, best_axis) = spans[0]
+        if best_span < MIN_LEARN_RANGE:
+            return None
+        for span, (guid, axis) in spans[1:]:
+            if guid != best_guid or axis == best_axis:
+                continue
+            if span >= MIN_LEARN_RANGE and span >= best_span * STICK_PAIR_MIN_RATIO:
+                lo, hi = sorted((best_axis, axis))
+                return (best_guid, lo, hi)
+            break  # spans are sorted; nothing after this can qualify either
+        return None
+
     def _finish_learn(self):
         if self.pressed_button is not None:
             guid, button_index = self.pressed_button
@@ -542,6 +580,15 @@ class LearnDialog(tk.Toplevel):
                 (name for g, name, _js in self.controllers if g == guid), "unknown controller"
             )
             self._show_button_form(guid, controller_name, button_index)
+            return
+
+        stick = self._stick_candidate()
+        if stick is not None:
+            guid, axis_a, axis_b = stick
+            controller_name = next(
+                (name for g, name, _js in self.controllers if g == guid), "unknown controller"
+            )
+            self._show_stick_form(guid, controller_name, axis_a, axis_b)
             return
 
         spans = [(self.maxs[k] - self.mins[k], k) for k in self.mins]
@@ -616,6 +663,83 @@ class LearnDialog(tk.Toplevel):
 
         return resolve
 
+    def _show_stick_form(self, controller_guid, controller_name, axis_a, axis_b):
+        """Both axes of one stick -> one node's X and Y, in a single step."""
+        for child in self.winfo_children():
+            child.destroy()
+
+        ttk.Label(
+            self,
+            text=(f"Detected {controller_name} axes {axis_a} + {axis_b} — a stick. "
+                  "Link both to one pan/tilt node:"),
+            padding=(12, 12, 12, 4),
+            wraplength=340,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+
+        form = ttk.Frame(self, padding=12)
+        form.grid(row=1, column=0, columnspan=2, sticky="ew")
+        resolve_node_id = self._build_node_picker(form)
+
+        # Which half of the stick drives pan. The lower axis index is X on
+        # essentially every gamepad, but a flight stick or an odd HID mapping
+        # can disagree, so it's one checkbox to swap rather than a re-learn.
+        swap_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text=f"Swap (use axis {axis_b} for X, axis {axis_a} for Y)",
+                        variable=swap_var).grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        invert_x = tk.BooleanVar(value=False)
+        invert_y = tk.BooleanVar(value=True)  # screen/stick down usually means "tilt down"
+        ttk.Checkbutton(form, text="Invert X", variable=invert_x).grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Checkbutton(form, text="Invert Y", variable=invert_y).grid(row=3, column=1, sticky="w", pady=(6, 0))
+
+        ttk.Label(form, text="X angle range (°):").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        x_min = tk.DoubleVar(value=DEFAULT_ANGLE_MIN)
+        x_max = tk.DoubleVar(value=DEFAULT_ANGLE_MAX)
+        ttk.Entry(form, textvariable=x_min, width=8).grid(row=4, column=1, sticky="w", pady=(6, 0))
+        ttk.Entry(form, textvariable=x_max, width=8).grid(row=4, column=2, sticky="w", pady=(6, 0))
+
+        ttk.Label(form, text="Y angle range (°):").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        y_min = tk.DoubleVar(value=DEFAULT_ANGLE_MIN)
+        y_max = tk.DoubleVar(value=DEFAULT_ANGLE_MAX)
+        ttk.Entry(form, textvariable=y_min, width=8).grid(row=5, column=1, sticky="w", pady=(6, 0))
+        ttk.Entry(form, textvariable=y_max, width=8).grid(row=5, column=2, sticky="w", pady=(6, 0))
+
+        def save():
+            node_id = resolve_node_id()
+            if node_id is None:
+                return
+            try:
+                ranges = {
+                    "x": (float(x_min.get()), float(x_max.get())),
+                    "y": (float(y_min.get()), float(y_max.get())),
+                }
+            except (tk.TclError, ValueError):
+                messagebox.showerror("Invalid input", "Angle ranges must be numbers.", parent=self)
+                return
+
+            pan_axis, tilt_axis = (axis_b, axis_a) if swap_var.get() else (axis_a, axis_b)
+            for axis_index, target, invert in ((pan_axis, "x", invert_x.get()),
+                                               (tilt_axis, "y", invert_y.get())):
+                lo, hi = ranges[target]
+                self.on_saved(AxisMapping(
+                    controller_guid=controller_guid,
+                    controller_name=controller_name,
+                    axis_index=axis_index,
+                    raw_min=self.mins[(controller_guid, axis_index)],
+                    raw_max=self.maxs[(controller_guid, axis_index)],
+                    node_id=node_id,
+                    angle_min=lo,
+                    angle_max=hi,
+                    invert=invert,
+                    target_axis=target,
+                ))
+            self.destroy()
+
+        btns = ttk.Frame(self, padding=(12, 0, 12, 12))
+        btns.grid(row=2, column=0, columnspan=2, sticky="e")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
+        ttk.Button(btns, text="Save Both Mappings", command=save).pack(side="left")
+
     def _show_button_form(self, controller_guid, controller_name, button_index):
         for child in self.winfo_children():
             child.destroy()
@@ -689,6 +813,13 @@ class LearnDialog(tk.Toplevel):
             row=4, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
 
+        ttk.Label(form, text="Drives:").grid(row=5, column=0, sticky="w", pady=(6, 0))
+        target_var = tk.StringVar(value="x")
+        axis_row = ttk.Frame(form)
+        axis_row.grid(row=5, column=1, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Radiobutton(axis_row, text="X (pan)", variable=target_var, value="x").pack(side="left")
+        ttk.Radiobutton(axis_row, text="Y (tilt)", variable=target_var, value="y").pack(side="left", padx=(10, 0))
+
         def save():
             node_id = resolve_node_id()
             if node_id is None:
@@ -709,6 +840,7 @@ class LearnDialog(tk.Toplevel):
                 angle_min=angle_min,
                 angle_max=angle_max,
                 invert=invert_var.get(),
+                target_axis=target_var.get(),
             )
             self.on_saved(mapping)
             self.destroy()
@@ -793,10 +925,7 @@ class UploadDialog(tk.Toplevel):
 
     def _refresh_node_choices(self):
         rows = self._current_rows()
-        node_ids = sorted(
-            {nid for _, angles, _ in rows for nid in angles}
-            | {nid for _, _, lights in rows for nid in lights}
-        )
+        node_ids = sorted({nid for row in rows for ch in (1, 2, 3) for nid in row[ch]})
         self.node_combo["values"] = [str(n) for n in node_ids]
         if node_ids and not self.node_var.get():
             self.node_var.set(str(node_ids[0]))
@@ -811,7 +940,7 @@ class UploadDialog(tk.Toplevel):
             )
         else:
             target_desc = " Only the selected Node's own column is sent — the others are never transmitted to it." if node_ids else ""
-        light_ids = sorted({nid for _, _, lights in rows for nid in lights})
+        light_ids = sorted({nid for row in rows for nid in row[3]})
         light_desc = f" Light track included for Node(s) {', '.join(str(n) for n in light_ids)}." if light_ids else ""
         self.hint_var.set(
             f"{duration_s:.1f}s of motion."
@@ -828,10 +957,7 @@ class UploadDialog(tk.Toplevel):
             return
 
         if self.all_nodes_var.get():
-            node_ids = sorted(
-                {nid for _, angles, _ in rows for nid in angles}
-                | {nid for _, _, lights in rows for nid in lights}
-            )
+            node_ids = sorted({nid for row in rows for ch in (1, 2, 3) for nid in row[ch]})
             if not node_ids:
                 messagebox.showerror("No Nodes", "No Node data found in the selected source.", parent=self)
                 return
@@ -877,7 +1003,8 @@ class App:
         # tracks it per target too (see NetworkLink::lastRelayFor), so these
         # stay in step as long as nothing else is switching the same Node.
         self.relay_state = {}
-        self.last_angle_sent = {}  # node_id -> last angle commanded, for light-only changes
+        self.relay_sent = {}   # node_id -> light state actually put on the wire
+        self.last_sent = {}  # node_id -> {"x","y"} last commanded, for partial updates
 
         self.recording = False
         self.record_start_ms = None
@@ -1213,15 +1340,33 @@ class App:
     def _button_mappings(self):
         return [m for m in self.mappings if isinstance(m, ButtonMapping)]
 
-    def _send_node(self, node_id, angle, relay_on):
-        """One move command carrying both the angle and that Node's light.
+    def _send_node(self, node_id, x, y, relay_on):
+        """One move command carrying both servo axes and that Node's light.
 
-        Always sends both together: the firmware carries relay state on move
-        commands, so this is also what keeps a Node's light from being reset
-        by an angle-only command (see ../docs/serial-protocol.md)."""
-        line = self.link.send({"node": node_id, "angle": round(angle, 1), "relay": bool(relay_on)})
-        self.last_angle_sent[node_id] = angle
+        Everything travels together deliberately: the firmware carries relay
+        state on move commands, and both axes in one packet so a Node never
+        acts on half a move (see ../docs/serial-protocol.md). Sending X and Y
+        separately would make the head dog-leg to every diagonal — and record
+        that dog-leg, if the Node is capturing."""
+        line = self.link.send({
+            "node": node_id,
+            "x": round(x, 1),
+            "y": round(y, 1),
+            "relay": bool(relay_on),
+        })
+        self.last_sent[node_id] = {"x": x, "y": y}
         return line
+
+    def _last_pos(self, node_id):
+        """Where we last put this Node, for filling in an axis we have no
+        fresh value for. Falls back to what the Node itself reports, then to
+        the centre of a default range."""
+        known = self.known_nodes.get(node_id, {})
+        remembered = self.last_sent.get(node_id, {})
+        return {
+            "x": remembered.get("x", known.get("x", DEFAULT_HOLD_ANGLE)),
+            "y": remembered.get("y", known.get("y", DEFAULT_HOLD_ANGLE)),
+        }
 
     def _update_streaming_availability(self):
         if self.mappings:
@@ -1256,39 +1401,29 @@ class App:
                 now_ms = int(time.monotonic() * 1000)
                 streaming = self.streaming_var.get() and self.link.is_open
 
-                # Buttons first, so a light switched on this tick is already
-                # reflected in the move commands (and the recording) below.
+                # Buttons first, so a light switched on this tick goes out with
+                # the same command as the motion below rather than a tick later.
                 lights = {}
                 for m in self._button_mappings():
                     js = self.joysticks.get(m.controller_guid)
-                    if js is None:
+                    pressed = None
+                    if js is not None:
+                        try:
+                            pressed = bool(js.get_button(m.button_index))
+                        except pygame.error:
+                            pressed = None
+                    if pressed is None:
                         lights[m.node_id] = self.relay_state.get(m.node_id, False)
                         continue
-                    try:
-                        pressed = bool(js.get_button(m.button_index))
-                    except pygame.error:
-                        lights[m.node_id] = self.relay_state.get(m.node_id, False)
-                        continue
-
                     current = self.relay_state.get(m.node_id, False)
                     desired = m.next_state(pressed, current)
-                    changed = desired != current
                     self.relay_state[m.node_id] = desired
                     lights[m.node_id] = desired
 
-                    # A light change has to travel on a move command, so send
-                    # one immediately at the Node's last commanded angle
-                    # rather than waiting for its axis to move again — a
-                    # light-only Node may have no axis mapping at all.
-                    if changed and streaming:
-                        angle = self.last_angle_sent.get(m.node_id, DEFAULT_HOLD_ANGLE)
-                        try:
-                            line = self._send_node(m.node_id, angle, desired)
-                            self._log(f"-> {line.rstrip()}")
-                        except (RuntimeError, serial.SerialException, OSError) as exc:
-                            self._log(f"-- light send failed: {exc} --")
-
-                sample = {}
+                # Then every mapped stick axis, collected per node so each one
+                # gets a single command with both of its axes.
+                xs, ys = {}, {}
+                moved = set()
                 for m in self._axis_mappings():
                     js = self.joysticks.get(m.controller_guid)
                     if js is None:
@@ -1298,20 +1433,33 @@ class App:
                     except pygame.error:
                         continue
                     angle = m.compute_angle(raw)
-                    sample[m.node_id] = angle
-                    if streaming:
-                        if m.last_sent_angle is None or abs(angle - m.last_sent_angle) >= ANGLE_SEND_EPSILON:
-                            m.last_sent_angle = angle
-                            try:
-                                line = self._send_node(
-                                    m.node_id, angle, self.relay_state.get(m.node_id, False)
-                                )
-                                self._log(f"-> {line.rstrip()}")
-                            except (RuntimeError, serial.SerialException, OSError) as exc:
-                                self._log(f"-- send failed: {exc} --")
+                    (xs if m.target_axis == "x" else ys)[m.node_id] = angle
+                    if m.last_sent_angle is None or abs(angle - m.last_sent_angle) >= ANGLE_SEND_EPSILON:
+                        m.last_sent_angle = angle
+                        moved.add(m.node_id)
+
+                if streaming:
+                    # A node is (re)sent when one of its axes moved past the
+                    # epsilon, or when its light just changed.
+                    due = set(moved)
+                    for node_id, state in lights.items():
+                        if state != self.relay_sent.get(node_id):
+                            due.add(node_id)
+                    for node_id in sorted(due):
+                        pos = self._last_pos(node_id)
+                        x = xs.get(node_id, pos["x"])
+                        y = ys.get(node_id, pos["y"])
+                        relay_on = lights.get(node_id, self.relay_state.get(node_id, False))
+                        try:
+                            line = self._send_node(node_id, x, y, relay_on)
+                            self.relay_sent[node_id] = relay_on
+                            self._log(f"-> {line.rstrip()}")
+                        except (RuntimeError, serial.SerialException, OSError) as exc:
+                            self._log(f"-- send failed: {exc} --")
+
                 if self.recording:
                     elapsed = now_ms - self.record_start_ms
-                    self.record_buffer.append((elapsed, sample, dict(lights)))
+                    self.record_buffer.append((elapsed, dict(xs), dict(ys), dict(lights)))
                     self.record_status_var.set(f"recording… {len(self.record_buffer)} samples")
 
         self._tick_job = self.root.after(TICK_INTERVAL_MS, self._tick)
@@ -1395,16 +1543,18 @@ class App:
     def _send_playback_row(self):
         if self.playback_index >= len(self._playback_plan):
             return
-        t_ms, sample, lights = self._playback_plan[self.playback_index]
-        # A Node with a recorded light track but no recorded motion still
-        # needs a command to carry that light, so it gets its last commanded
-        # angle (or the default hold angle) instead of being skipped.
-        node_ids = sorted(set(sample) | set(lights))
+        t_ms, xs, ys, lights = self._playback_plan[self.playback_index]
+        # A Node present in any channel gets a command; channels the recording
+        # doesn't have for it are filled from where we last put it, so a
+        # pan-only or light-only recording holds everything else still.
+        node_ids = sorted(set(xs) | set(ys) | set(lights))
         for node_id in node_ids:
-            angle = sample.get(node_id, self.last_angle_sent.get(node_id, DEFAULT_HOLD_ANGLE))
+            pos = self._last_pos(node_id)
+            x = xs.get(node_id, pos["x"])
+            y = ys.get(node_id, pos["y"])
             relay_on = lights.get(node_id, self.relay_state.get(node_id, False))
             try:
-                line = self._send_node(node_id, angle, relay_on)
+                line = self._send_node(node_id, x, y, relay_on)
                 self._log(f"-> {line.rstrip()}")
             except (RuntimeError, serial.SerialException, OSError) as exc:
                 self._log(f"-- playback send failed: {exc} --")
@@ -1520,16 +1670,17 @@ class App:
         )
 
     def _begin_upload(self, rows, node_id, name, clear_first=False):
-        # This Node's own two tracks: its angle column, and its light column.
-        # Either can be absent — an axis-only mapping records no light, a
-        # button-only one records no motion — but not both, or there's
-        # nothing to upload.
-        points = [(t, a[node_id], l.get(node_id)) for t, a, l in rows if node_id in a]
-        light_only = not points and any(node_id in l for _, _, l in rows)
-        if light_only:
-            # No motion recorded for this Node, only its light: hold it
-            # wherever it currently sits and upload the light track alone.
-            points = [(t, None, l.get(node_id)) for t, _, l in rows if node_id in l]
+        # This Node's own channels: X, Y and light. Any of them can be absent —
+        # a stick mapped to pan only, a button with no stick — but if all three
+        # are, there's nothing to upload.
+        def present(row):
+            return node_id in row[1] or node_id in row[2] or node_id in row[3]
+
+        points = [
+            (row[0], row[1].get(node_id), row[2].get(node_id), row[3].get(node_id))
+            for row in rows
+            if present(row)
+        ]
         if not points:
             messagebox.showerror("Upload failed", f"No data for Node {node_id} in the selected source.")
             self._finish_node_upload(node_id, ok=False)
@@ -1538,25 +1689,27 @@ class App:
             points = [p for p in points if p[0] <= UPLOAD_MAX_DURATION_MS]
             self._log(f"-- upload to Node {node_id} truncated to {UPLOAD_MAX_DURATION_MS / 1000:.0f}s (Node capacity) --")
 
-        # Whatever angle this Node is holding right now, for a light-only
-        # upload (and for any row whose angle column happens to be blank).
-        known = self.known_nodes.get(node_id, {})
-        hold_angle = known.get("angle", self.last_angle_sent.get(node_id, DEFAULT_HOLD_ANGLE))
+        # Whatever this Node is holding right now, to fill in any channel the
+        # recording doesn't cover for it.
+        hold = self._last_pos(node_id)
 
         # Resample to a dense, single-node point list at real-time pace —
         # the same mechanism CSV playback uses, just targeting one Node and
         # never touching the other columns (only this Node's data is ever
         # transmitted to it).
         single_node_rows = [
-            (t, {} if a is None else {node_id: a}, {} if l is None else {node_id: l})
-            for t, a, l in points
+            (t,
+             {} if x is None else {node_id: x},
+             {} if y is None else {node_id: y},
+             {} if l is None else {node_id: l})
+            for t, x, y, l in points
         ]
         plan = resample_rows(single_node_rows, TICK_INTERVAL_MS, 1.0)
 
         needed_bytes = estimate_sequence_file_bytes(points[-1][0])
         self._uploads[node_id] = {
             "name": name, "plan": plan, "index": 0, "retried": False, "job": None, "phase": "start",
-            "needed_bytes": needed_bytes, "hold_angle": hold_angle,
+            "needed_bytes": needed_bytes, "hold": hold,
         }
         self._refresh_upload_status()
 
@@ -1650,14 +1803,15 @@ class App:
             self._finish_upload_stream(node_id)
             return
 
-        t_ms, sample, lights = plan[idx]
-        # Same fallback as playback: a Node whose recording is light-only has
-        # no angle track, so hold it wherever it already is while its light
-        # is replayed into the Node's own recording.
-        angle = sample.get(node_id, state["hold_angle"])
+        t_ms, xs, ys, lights = plan[idx]
+        # Same fallback as playback: a channel this recording doesn't have for
+        # the Node holds where it already is while the rest is streamed into
+        # the Node's own recording.
+        x = xs.get(node_id, state["hold"]["x"])
+        y = ys.get(node_id, state["hold"]["y"])
         relay_on = lights.get(node_id, False)
         try:
-            self._send_node(node_id, angle, relay_on)
+            self._send_node(node_id, x, y, relay_on)
         except (RuntimeError, serial.SerialException, OSError) as exc:
             self._log(f"-- upload send failed, aborting (Node {node_id}): {exc} --")
             self._set_solo_status(node_id, f"upload to Node {node_id} failed (send error)")

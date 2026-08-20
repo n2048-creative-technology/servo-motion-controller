@@ -21,6 +21,16 @@ enum class OperatingMode : uint8_t {
   MASTER = 2
 };
 
+// One servo axis's calibration, stored twice in PersistedSettings.
+struct ServoCalibration {
+  uint16_t minUs = SERVO_DEFAULT_MIN_US;
+  uint16_t maxUs = SERVO_DEFAULT_MAX_US;
+  float minAngle = SERVO_DEFAULT_MIN_ANGLE;
+  float maxAngle = SERVO_DEFAULT_MAX_ANGLE;
+  float centerAngle = SERVO_DEFAULT_CENTER_ANGLE;
+  bool invert = false;
+};
+
 struct PersistedSettings {
   uint32_t magic = SETTINGS_MAGIC;
   uint16_t version = SETTINGS_VERSION;
@@ -28,19 +38,20 @@ struct PersistedSettings {
   char apSsid[33] = {0};
   char apPassword[65] = {0};
 
-  uint16_t servoMinUs = SERVO_DEFAULT_MIN_US;
-  uint16_t servoMaxUs = SERVO_DEFAULT_MAX_US;
-  float servoMinAngle = SERVO_DEFAULT_MIN_ANGLE;
-  float servoMaxAngle = SERVO_DEFAULT_MAX_ANGLE;
-  float servoCenterAngle = SERVO_DEFAULT_CENTER_ANGLE;
-  bool servoInvert = false;
+  // One block per axis: X (pan, D10) and Y (tilt, D3) are usually different
+  // servos with different mechanical ranges, so they calibrate separately.
+  ServoCalibration servoX;
+  ServoCalibration servoY;
 
   // Relay/light output on D7 — see RELAY_PIN in Config.h.
   bool relayActiveLow = RELAY_DEFAULT_ACTIVE_LOW;
 
   bool autostartEnabled = false;
   AutostartTarget autostartTarget = AutostartTarget::NONE;
-  PatternParams autostartPattern;
+  // One pattern per axis: the two run independently, so a head can (say) sweep
+  // in X while holding a slow triangle in Y.
+  PatternParams autostartPatternX;
+  PatternParams autostartPatternY;
   char autostartSequenceName[24] = {0}; // which /seq/<name>.bin to loop, when target == SEQUENCE
 
   OperatingMode networkMode = OperatingMode::STANDALONE;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 // arduino-esp32's default C++ standard doesn't reliably provide std::clamp,
@@ -9,15 +10,27 @@ static inline T clampValue(T value, T lo, T hi) {
   return value < lo ? lo : (value > hi ? hi : value);
 }
 
-// ---- Servo ----
-// Same silkscreen pin (D10) on both boards, but it's wired to a different
-// GPIO: the XIAO ESP32S3 pins D10/D9 are swapped relative to the ESP32C3
-// (D10=GPIO9 on the S3 vs D10=GPIO10 on the C3). Selecting by GPIO number
-// instead would move the servo signal to a different physical pin per board.
+// ---- Servos (pan/tilt) ----
+// A node drives a two-axis head: X (pan) on D10, Y (tilt) on D3.
+//
+// Both are picked by silkscreen pin rather than GPIO number, because the same
+// label sits on a different GPIO per board: the XIAO ESP32S3's D10/D9 are
+// swapped relative to the ESP32C3 (D10=GPIO9 on the S3 vs D10=GPIO10 on the
+// C3). Selecting by GPIO number instead would move a servo signal to a
+// different physical pin depending on which board is being built.
+//
+// D3 is GPIO5 on the C3 and GPIO4 on the S3 — neither is a strapping pin on
+// its chip, and neither is used by anything else in this firmware.
+//
+// Both servos share LEDC timer 0: they run at the same 50Hz, which is exactly
+// what a shared timer supports, and the C3 (the tighter of the two chips) has
+// 6 LEDC channels for 2 servos. See ServoController::begin().
 #if defined(ARDUINO_XIAO_ESP32S3)
-static constexpr uint8_t SERVO_PIN = 9; // XIAO ESP32S3 D10 / GPIO9
+static constexpr uint8_t SERVO_X_PIN = 9; // XIAO ESP32S3 D10 / GPIO9
+static constexpr uint8_t SERVO_Y_PIN = 4; // XIAO ESP32S3 D3  / GPIO4
 #else
-static constexpr uint8_t SERVO_PIN = 10; // XIAO ESP32C3 D10 / GPIO10
+static constexpr uint8_t SERVO_X_PIN = 10; // XIAO ESP32C3 D10 / GPIO10
+static constexpr uint8_t SERVO_Y_PIN = 5;  // XIAO ESP32C3 D3  / GPIO5
 #endif
 static constexpr uint16_t SERVO_DEFAULT_MIN_US = 500;
 static constexpr uint16_t SERVO_DEFAULT_MAX_US = 2500;
@@ -64,26 +77,34 @@ static constexpr uint32_t RECORD_INTERVAL_MS = 50;  // 20 Hz recording capture
 static constexpr uint32_t STATUS_BROADCAST_MS = 100; // 10 Hz WS status push
 
 // ---- Sequence storage ----
-// 12000 * 50ms = 600s (10 min) max recording. This is a fixed-size static
-// array (SequenceStore::points_, 8 bytes/point), not heap — it's carved out
+// 8000 * 50ms = 400s (6min40s) max recording. This is a fixed-size static
+// array (SequenceStore::points_, 12 bytes/point), not heap — it's carved out
 // of every board's RAM at link time whether or not it's ever filled, so
-// raising it is a firmware-wide RAM budget decision shared by every board
+// changing it is a firmware-wide RAM budget decision shared by every board
 // (Master and Node roles both link SequenceStore in). Sized to leave a
 // healthy safety margin against the tightest board in this project's
-// current lineup, the XIAO ESP32C3: ~193KB free heap at boot before this
-// was raised, ~86KB more of that spent on the bigger array here, still
-// ~107KB left for WiFi/AsyncWebServer/ESP-NOW/JSON's own runtime needs —
-// verified via a real ~10-minute record/save/reload round trip on hardware,
-// not just this arithmetic. See docs/serial-protocol.md.
-static constexpr uint16_t MAX_SEQ_POINTS = 12000;
+// current lineup, the XIAO ESP32C3, which had ~107KB free heap for
+// WiFi/AsyncWebServer/ESP-NOW/JSON with the previous 96KB array.
+//
+// When each point gained a Y axis it grew 8 -> 12 bytes, so the count came
+// down 12000 -> 8000 to hold the array at that same 96KB rather than spend
+// another 48KB of a budget that was already the tightest thing on this
+// board. The cost is max recording length: 10min -> 6min40s. See
+// docs/serial-protocol.md.
+static constexpr uint16_t MAX_SEQ_POINTS = 8000;
 static constexpr const char *SEQUENCE_LEGACY_FILE_PATH = "/sequence.bin"; // v1 single fixed file, migrated once
 static constexpr uint32_t SEQUENCE_FILE_MAGIC = 0x51455331; // "1SEQ"
-// v2: each point carries the relay/light state alongside the angle. The point
-// struct's size is unchanged (the flags byte lands in what v1 left as
-// padding), so a v1 file still loads — its junk padding bytes are just
-// cleared to "relay off" on read. See SequenceStore::loadNamed().
-static constexpr uint16_t SEQUENCE_FILE_VERSION = 2;
+// v2: each point carries the relay/light state alongside the angle (the flags
+// byte landed in what v1 left as padding, so v1 and v2 records are both 8
+// bytes). v3: a second servo axis, so a point is {t, x, y, flags} = 12 bytes.
+// v1/v2 files still load — their 8-byte records are read and expanded, and
+// the sequence is marked as having no Y track so playback leaves that axis
+// alone rather than inventing a position for it. See
+// SequenceStore::loadNamed().
+static constexpr uint16_t SEQUENCE_FILE_VERSION = 3;
 static constexpr uint16_t SEQUENCE_FILE_VERSION_MIN = 1; // oldest still readable
+static constexpr uint16_t SEQUENCE_FILE_VERSION_XY = 3;  // first version with a Y axis
+static constexpr size_t SEQUENCE_POINT_BYTES_V1 = 8;     // {t, angle, flags, pad}
 static constexpr const char *SEQUENCE_DIR = "/seq"; // v2+: one "<name>.bin" file per named sequence
 static constexpr uint8_t SEQ_NAME_MAX_LEN = 23;      // + null terminator = sizeof(NetPacket::seqName)
 static constexpr uint8_t SEQ_MAX_LISTED = 16;        // cap for directory listing / UI dropdowns
@@ -93,7 +114,7 @@ static constexpr const char *SEQUENCE_LEGACY_MIGRATED_NAME = "local";
 static constexpr const char *NVS_NAMESPACE = "app";
 static constexpr const char *NVS_KEY = "cfg";
 static constexpr uint32_t SETTINGS_MAGIC = 0x53565831; // "1XVS"
-static constexpr uint16_t SETTINGS_VERSION = 5; // v5: added relay config + RANDOM pattern params (older blobs fall back to defaults)
+static constexpr uint16_t SETTINGS_VERSION = 6; // v6: per-axis (X/Y) servo calibration + per-axis autostart pattern (older blobs fall back to defaults)
 
 // ---- WiFi AP defaults ----
 static constexpr const char *AP_SSID_PREFIX = "ServoRig-";
@@ -128,12 +149,13 @@ static constexpr uint16_t DNS_PORT = 53;
 // Bump this whenever a release changes what the API/UI can do — it's the
 // only way to tell from the outside which build a board is actually running
 // (GET /api/status, and the Settings tab shows it). 2.1.0: RANDOM pattern,
-// relay/light output on D7, servo-range-aware jog fader.
-static constexpr const char *FIRMWARE_VERSION = "2.1.0";
+// relay/light output on D7, servo-range-aware jog fader. 2.2.0: second servo
+// axis (pan/tilt) on D3, XY trackpad, per-axis patterns.
+static constexpr const char *FIRMWARE_VERSION = "2.2.0";
 
 // ---- Master/Node network (ESP-NOW) ----
 static constexpr uint8_t NET_PACKET_MAGIC = 0xE5;
-static constexpr uint8_t NET_PACKET_VERSION = 5; // v5: CMD carries the relay/light state alongside the angle
+static constexpr uint8_t NET_PACKET_VERSION = 6; // v6: CMD/HELLO carry both servo axes (X and Y)
 static constexpr uint8_t NET_BROADCAST_NODE = 0; // targetNode value meaning "all nodes"
 static constexpr uint8_t NET_NODE_ID_MIN = 1;
 static constexpr uint8_t NET_NODE_ID_MAX = 250;

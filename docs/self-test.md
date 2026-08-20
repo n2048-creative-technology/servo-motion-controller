@@ -8,7 +8,7 @@ lines and free heap comfortably above ~40KB:
 ```
 [SELFTEST] booting servo-motion-controller
 [SELFTEST] settings loaded (version=1, autostart=0)
-[SELFTEST] servo attached pin=10 range=500-2500us
+[SELFTEST] servos attached X=pin10 500-2500us, Y=pin5 500-2500us
 [SELFTEST] relay pin=20 active_high, starting off
 [SELFTEST] littlefs mount OK
 [SELFTEST] sequence file: none
@@ -35,7 +35,7 @@ What each line confirms:
 | Line | Confirms |
 |---|---|
 | `settings loaded` | NVS read succeeded (or factory defaults were written on first boot) |
-| `servo attached` | LEDC timer + servo pulse range initialized on GPIO10 |
+| `servos attached` | LEDC timer + pulse ranges initialized for both axes: pan on D10, tilt on D3 |
 | `relay pin=...` | Relay output driven to its off level on D7 (GPIO20 on the C3, GPIO44 on the S3); `active_low` reflects the Settings → Relay / Light polarity |
 | `littlefs mount OK` | Filesystem partition is readable (formats itself on first-ever boot) |
 | `sequence file: ...` | Whether a previously saved `/sequence.bin` was found and loaded |
@@ -59,16 +59,19 @@ SSID isn't empty and the password (if set) is empty or ≥8 characters.
    target "Recorded sequence" should then show points/duration.
 4. Enable Autostart with a target, power-cycle the board, and confirm the
    servo starts moving on its own before you reconnect to the AP.
-5. Flip the **Light** toggle beside the jog fader — the relay should click and
+5. Flip the **Light** toggle beside the trackpad — the relay should click and
    stay switched. If it's on when the toggle is off (and vice versa), tick
    **Active low** in Settings → Relay / Light.
-6. Pick the **Random** pattern, set a short interval range, hit **Start
-   Loop** — the servo should move to a new position at irregular intervals,
-   easing into and out of each move rather than snapping. Nothing should ever
-   take it past the Min/Max angle in Servo Calibration; lower **Max speed**
-   if the moves look faster than the servo can comfortably track.
-7. Record with the Light toggled on partway through, save, then play it back —
-   the light should switch at the same point in the replay.
+6. Drag around the **XY trackpad** — pan should follow left/right and tilt
+   up/down, both staying inside their own calibrated limits.
+7. Pick the **Random** pattern for *both* axes, set a short interval range,
+   hit **Start Loop** — the head should look at a new point at irregular
+   intervals, easing into and out of each move rather than snapping, with
+   both axes arriving together. Nothing should ever take either axis past
+   its Min/Max angle; lower **Max speed** if the moves look faster than the
+   servos can comfortably track.
+8. Record while moving both axes and toggling the Light partway through,
+   save, then play it back — pan, tilt and light should all replay together.
 
 These functional steps require real hardware and have not been run in this
 environment — only the firmware and filesystem-image builds were verified.

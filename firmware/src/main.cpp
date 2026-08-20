@@ -3,26 +3,26 @@
 #include <LittleFS.h>
 
 #include "Config.h"
-#include "IAngleSink.h"
+#include "IMotionSink.h"
 #include "IRelaySink.h"
-#include "ServoController.h"
+#include "ServoPair.h"
 #include "RelayController.h"
 #include "SettingsStore.h"
 #include "SequenceStore.h"
 #include "PlaybackEngine.h"
 #include "WebApi.h"
 #include "NetworkLink.h"
-#include "NetworkAngleSink.h"
+#include "NetworkMotionSink.h"
 #include "SerialBridge.h"
 
-ServoController servo;
+ServoPair servos;
 RelayController relay;
 SettingsStore settingsStore;
 SequenceStore sequenceStore;
 PlaybackEngine playback;
 WebApi webApi;
 NetworkLink networkLink;
-NetworkAngleSink networkAngleSink;
+NetworkMotionSink networkMotionSink;
 SerialBridge serialBridge;
 
 static const IPAddress AP_IP(192, 168, 4, 1);
@@ -53,11 +53,14 @@ void setup() {
   Serial.printf("[SELFTEST] settings loaded (version=%u, autostart=%d)\n", settings.version,
                 settings.autostartEnabled ? 1 : 0);
 
-  servo.begin(SERVO_PIN, settings.servoMinUs, settings.servoMaxUs, settings.servoMinAngle,
-              settings.servoMaxAngle, settings.servoInvert);
-  servo.writeAngle(settings.servoCenterAngle);
-  Serial.printf("[SELFTEST] servo attached pin=%d range=%u-%uus\n", SERVO_PIN, settings.servoMinUs,
-                settings.servoMaxUs);
+  servos.x().begin(SERVO_X_PIN, settings.servoX.minUs, settings.servoX.maxUs, settings.servoX.minAngle,
+                   settings.servoX.maxAngle, settings.servoX.invert);
+  servos.y().begin(SERVO_Y_PIN, settings.servoY.minUs, settings.servoY.maxUs, settings.servoY.minAngle,
+                   settings.servoY.maxAngle, settings.servoY.invert);
+  servos.writeAngles(settings.servoX.centerAngle, settings.servoY.centerAngle);
+  Serial.printf("[SELFTEST] servos attached X=pin%d %u-%uus, Y=pin%d %u-%uus\n", SERVO_X_PIN,
+                settings.servoX.minUs, settings.servoX.maxUs, SERVO_Y_PIN, settings.servoY.minUs,
+                settings.servoY.maxUs);
 
   relay.begin(RELAY_PIN, settings.relayActiveLow);
   Serial.printf("[SELFTEST] relay pin=%d active_%s, starting off\n", RELAY_PIN,
@@ -85,18 +88,18 @@ void setup() {
   // PlaybackEngine's jog/pattern/sequence logic is repointed at a
   // NetworkAngleSink; every other mode drives the physical ServoController
   // exactly as in v1. Autostart only makes sense with a real attached servo.
-  IAngleSink *sink = &servo;
+  IMotionSink *sink = &servos;
   IRelaySink *relaySink = &relay;
   if (settings.networkMode == OperatingMode::MASTER) {
     // Always full power — see WIFI_TX_POWER_MAX's comment in Config.h. Set
     // explicitly rather than just never lowering it, so this doesn't
     // silently depend on the core's own boot-time default matching.
     WiFi.setTxPower(static_cast<wifi_power_t>(WIFI_TX_POWER_MAX));
-    networkAngleSink.begin(&networkLink);
-    sink = &networkAngleSink;
+    networkMotionSink.begin(&networkLink);
+    sink = &networkMotionSink;
     // A Master's own D7 stays idle: its light toggle drives the selected
     // Node(s)' relays over ESP-NOW, exactly like its jog slider does.
-    relaySink = &networkAngleSink;
+    relaySink = &networkMotionSink;
     serialBridge.begin(&networkLink);
     networkLink.onSeqAck([](uint8_t nodeId, const char *name, SeqAckStatus status, uint16_t points) {
       serialBridge.reportUploadResult(nodeId, name, status, points);
@@ -105,8 +108,9 @@ void setup() {
       serialBridge.reportSpaceReply(nodeId, freeBytes);
     });
   } else if (settings.networkMode == OperatingMode::NODE) {
-    networkLink.onNodeCommand(
-        [](float angleDeg, bool relayOn) { playback.onNetworkCommand(angleDeg, relayOn, millis()); });
+    networkLink.onNodeCommand([](float angleX, float angleY, bool relayOn) {
+      playback.onNetworkCommand(angleX, angleY, relayOn, millis());
+    });
     // A Master remotely uploading a sequence is just a remotely-triggered
     // recording: start/stop reuse the exact same PlaybackEngine/SequenceStore
     // calls the local /api/record/start|save routes make (see WebApi.cpp) —
@@ -140,7 +144,8 @@ void setup() {
     networkLink.onSpaceQuery([]() { networkLink.sendSpaceReply(SequenceStore::freeSpaceBytes()); });
   }
   playback.begin(sink, &sequenceStore, relaySink);
-  playback.setAngleLimits(settings.servoMinAngle, settings.servoMaxAngle);
+  playback.setAngleLimits(settings.servoX.minAngle, settings.servoX.maxAngle, settings.servoY.minAngle,
+                          settings.servoY.maxAngle);
 
   if (settings.networkMode != OperatingMode::MASTER) {
     // Applied before the web server comes up: a configured pattern/sequence
@@ -153,7 +158,7 @@ void setup() {
     }
   }
 
-  webApi.begin(&playback, &sequenceStore, &settingsStore, &servo, &relay, &networkLink, sink, AP_IP);
+  webApi.begin(&playback, &sequenceStore, &settingsStore, &servos, &relay, &networkLink, sink, AP_IP);
   Serial.println("[SELFTEST] webserver started, ws clients=0");
 
   Serial.printf("[SELFTEST] free heap=%u bytes, network mode=%d node_id=%u\n", ESP.getFreeHeap(),
@@ -166,7 +171,7 @@ void loop() {
   if (now - lastTickMs >= TICK_INTERVAL_MS) {
     lastTickMs = now;
     playback.tick(now);
-    networkLink.reportLocalAngle(servo.getAngle());
+    networkLink.reportLocalAngles(servos.getX(), servos.getY());
     networkLink.reportLocalRelay(relay.relayState());
 
     if (bootNetworkMode == OperatingMode::NODE) {

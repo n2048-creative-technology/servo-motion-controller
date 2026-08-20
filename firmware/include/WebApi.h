@@ -8,17 +8,17 @@
 class PlaybackEngine;
 class SequenceStore;
 class SettingsStore;
-class ServoController;
+class ServoPair;
 class RelayController;
 class NetworkLink;
-class IAngleSink;
+class IMotionSink;
 
 // Owns the HTTP/WebSocket server and the captive-portal DNS catch-all.
 // Registers all /api/* routes and serves the LittleFS-hosted single-page app.
 class WebApi {
 public:
   void begin(PlaybackEngine *playback, SequenceStore *sequence, SettingsStore *settingsStore,
-             ServoController *servo, RelayController *relay, NetworkLink *network, IAngleSink *angleSink,
+             ServoPair *servos, RelayController *relay, NetworkLink *network, IMotionSink *motionSink,
              const IPAddress &apIp);
 
   // Call every loop() iteration: services DNS captive-portal requests and
@@ -33,13 +33,13 @@ private:
   PlaybackEngine *playback_ = nullptr;
   SequenceStore *sequence_ = nullptr;
   SettingsStore *settingsStore_ = nullptr;
-  ServoController *servo_ = nullptr;
+  ServoPair *servos_ = nullptr;
   // The board's physical relay, for the active-low setting only — switching
   // the light goes through PlaybackEngine, so a Master's toggle reaches its
   // Nodes instead of its own idle D7 pin.
   RelayController *relay_ = nullptr;
   NetworkLink *network_ = nullptr;
-  IAngleSink *angleSink_ = nullptr;
+  IMotionSink *motionSink_ = nullptr;
 
   uint32_t lastStatusBroadcastMs_ = 0;
 

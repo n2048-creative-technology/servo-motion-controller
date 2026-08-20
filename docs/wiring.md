@@ -4,7 +4,8 @@
                  +-------------------------+
    USB-C  ------>| XIAO ESP32C3 / ESP32S3  |
                  |                         |
-                 |  D10           o--------+----> Servo signal (orange/yellow)
+                 |  D10           o--------+----> Servo X / pan  signal
+                 |  D3            o--------+----> Servo Y / tilt signal
                  |  D7            o--------+----> Relay module IN
                  |  GND           o--------+----> Servo GND (brown/black) ----+
                  |                         |      + relay module GND         |
@@ -17,14 +18,17 @@
                  +-------------------------+
 ```
 
-- **Signal**: XIAO pin **D10** → servo signal wire, on either board. This is
+- **Signals**: XIAO pin **D10** → the pan (X) servo, **D3** → the tilt (Y)
+  servo, on either board. This is
   the same silkscreen-labeled pin on both, but a different GPIO underneath —
   `SERVO_PIN` in `firmware/include/Config.h` selects the right one per board
   automatically (compiled in per-environment, nothing to configure). It's
   also mirrored in the default servo calibration shown in the Settings tab.
-- **Power**: run the servo from a separate 5–6V supply sized for its stall
-  current, not from the XIAO's own 3V3/5V rail, unless it's a small servo
-  drawing well under ~500mA. Tie the servo supply's GND to the XIAO's GND
+- **Power**: run the servos from a separate 5–6V supply sized for their stall
+  current, not from the XIAO's own 3V3/5V rail. **Two servos roughly double
+  the peak draw**, and both can move at once — a supply that just coped with
+  one pan servo is the first thing to suspect if a Node starts resetting
+  during fast moves (see docs/serial-protocol.md's brownout section). Tie the servo supply's GND to the XIAO's GND
   (common ground) — without this the PWM signal has no reference and the
   servo will behave erratically or not move at all.
 - **Relay**: XIAO pin **D7** → the relay module's IN/signal pin, plus a shared
@@ -43,6 +47,14 @@
 |---|---|---|
 | XIAO ESP32C3 | GPIO10 | General-purpose pin, no strapping-pin conflicts at boot (unlike GPIO2/8/9 on this chip, which affect boot mode selection). |
 | XIAO ESP32S3 | GPIO9 | General-purpose pin on this chip — the S3's boot-strapping pins are GPIO0/3/45/46, none of which GPIO9 shares. Confirmed booting cleanly on real hardware with the servo pin on GPIO9. |
+
+| Board | D3 (tilt) = | Why |
+|---|---|---|
+| XIAO ESP32C3 | GPIO5 | General-purpose pin; not one of the C3's strapping pins (GPIO2/8/9) and not used by anything else in this firmware. |
+| XIAO ESP32S3 | GPIO4 | General-purpose pin; not one of the S3's strapping pins (GPIO0/3/45/46). |
+
+Both servos share LEDC timer 0 — they run at the same 50Hz, which is what a
+shared timer supports, and each still gets its own channel (the C3 has 6).
 
 | Board | D7 = | Why |
 |---|---|---|

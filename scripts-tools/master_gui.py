@@ -2,12 +2,14 @@
 """GUI for sending servo positioning commands to a Master board over USB serial.
 
 Talks the line-based JSON protocol described in ../docs/serial-protocol.md:
-  -> {"node": <0-250>, "angle": <deg>, "relay": <bool>}
-                                         move a node (0 = all nodes), and
-                                         optionally switch its relay/light
+  -> {"node": <0-250>, "x": <deg>, "y": <deg>, "relay": <bool>}
+                                         aim a node's pan/tilt head (0 = all
+                                         nodes), and optionally switch its
+                                         relay/light. An omitted axis holds
+                                         its last commanded position.
   -> {"cmd": "list"}                     ask for the Master's known-node table
   <- {"ok": true|false, "error": "..."}  ack/error for a move command
-  <- {"type": "nodes", "nodes": [...]}   known-node table, incl. each node's light
+  <- {"type": "nodes", "nodes": [...]}   known-node table: id, x, y, light, age
 
 The Master tracks relay state per target, so switching one node's light
 never disturbs another's.
@@ -28,6 +30,9 @@ from serial.tools import list_ports
 from serial_link import SerialLink, BAUD_RATE
 
 NODE_POLL_INTERVAL_MS = 2000
+PAD_SIZE = 180           # px; the XY pad is square so both axes read alike
+PAD_ANGLE_MIN = 0.0      # the pad spans a servo's default 0-270 travel; the
+PAD_ANGLE_MAX = 270.0    # firmware clamps to each node's real calibration
 JOG_SEND_INTERVAL_S = 0.04  # ~25 Hz, matches the web UI's jog slider throttle
 MAX_LOG_LINES = 500
 
@@ -36,12 +41,12 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("Servo Rig — Master Bridge")
-        root.geometry("640x560")
+        root.geometry("760x700")  # wide enough for the XY pad beside the entries
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.incoming = queue.Queue()
         self.link = SerialLink(on_line=self.incoming.put, on_error=self._on_link_error)
-        self.nodes = {}  # node_id -> {"angle": float, "age_ms": int}
+        self.nodes = {}  # node_id -> {"x": float, "y": float, "relay": bool, "age_ms": int}
         self._jog_last_sent = 0.0
         self._poll_job = None
 
@@ -73,17 +78,19 @@ class App:
         nodes_frame.pack(fill="both", expand=False, padx=8, pady=(0, 8))
 
         self.node_tree = ttk.Treeview(
-            nodes_frame, columns=("angle", "light", "age"), show="tree headings", height=5,
+            nodes_frame, columns=("x", "y", "light", "age"), show="tree headings", height=5,
             selectmode="extended",
         )
-        self.node_tree.heading("#0", text="Node ID")
-        self.node_tree.column("#0", width=90)
-        self.node_tree.heading("angle", text="Angle")
+        self.node_tree.heading("#0", text="Node")
+        self.node_tree.column("#0", width=70)
+        self.node_tree.heading("x", text="X (pan)")
+        self.node_tree.heading("y", text="Y (tilt)")
         self.node_tree.heading("light", text="Light")
         self.node_tree.heading("age", text="Last seen")
-        self.node_tree.column("angle", width=90, anchor="center")
-        self.node_tree.column("light", width=60, anchor="center")
-        self.node_tree.column("age", width=110, anchor="center")
+        self.node_tree.column("x", width=80, anchor="center")
+        self.node_tree.column("y", width=80, anchor="center")
+        self.node_tree.column("light", width=55, anchor="center")
+        self.node_tree.column("age", width=100, anchor="center")
         self.node_tree.pack(side="left", fill="x", expand=True)
 
         btns = ttk.Frame(nodes_frame)
@@ -100,45 +107,51 @@ class App:
             send, text="All nodes (broadcast) — overrides the selection above", variable=self.all_nodes_var
         ).grid(row=0, column=0, columnspan=2, sticky="w")
 
-        ttk.Label(send, text="Fallback node ID (used if nothing is selected above):").grid(
-            row=0, column=2, columnspan=2, sticky="w"
-        )
+        ttk.Label(send, text="Fallback node ID:").grid(row=0, column=2, sticky="e", padx=(16, 0))
         self.node_var = tk.IntVar(value=0)
         ttk.Spinbox(send, from_=0, to=250, textvariable=self.node_var, width=6).grid(
-            row=0, column=4, sticky="w", padx=(4, 0)
+            row=0, column=3, sticky="w", padx=(4, 0)
         )
 
-        ttk.Label(send, text="Angle (deg):").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.angle_var = tk.DoubleVar(value=135.0)
-        self.angle_entry = ttk.Entry(send, textvariable=self.angle_var, width=8)
-        self.angle_entry.grid(row=1, column=1, sticky="w", pady=(8, 0))
-        self.angle_entry.bind("<Return>", lambda e: self._send_command())
+        self.x_var = tk.DoubleVar(value=135.0)
+        self.y_var = tk.DoubleVar(value=135.0)
+        ttk.Label(send, text="X (deg):").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        x_entry = ttk.Entry(send, textvariable=self.x_var, width=8)
+        x_entry.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        x_entry.bind("<Return>", lambda e: self._send_command())
+        ttk.Label(send, text="Y (deg):").grid(row=2, column=0, sticky="w")
+        y_entry = ttk.Entry(send, textvariable=self.y_var, width=8)
+        y_entry.grid(row=2, column=1, sticky="w")
+        y_entry.bind("<Return>", lambda e: self._send_command())
 
-        # Created before the Scale below: setting its initial value fires
-        # `command` immediately, and _on_scale_move reads live_jog_var.
+        # Created before the pad below, whose handlers read it.
         self.live_jog_var = tk.BooleanVar(value=False)
 
-        self.angle_scale = ttk.Scale(
-            send, from_=0, to=270, orient="horizontal", command=self._on_scale_move
-        )
-        self.angle_scale.set(135.0)
-        self.angle_scale.grid(row=1, column=2, columnspan=3, sticky="ew", pady=(8, 0))
-        send.columnconfigure(4, weight=1)
+        # Square XY pad: click or drag to aim. Left/right is X, and *up* is
+        # higher Y, matching the web UI's trackpad.
+        self.pad = tk.Canvas(send, width=PAD_SIZE, height=PAD_SIZE, bg="#14161a",
+                             highlightthickness=1, highlightbackground="#2b2f36", cursor="crosshair")
+        self.pad.grid(row=1, column=2, rowspan=3, columnspan=3, sticky="w", padx=(16, 0), pady=(8, 0))
+        self.pad.bind("<Button-1>", self._on_pad_drag)
+        self.pad.bind("<B1-Motion>", self._on_pad_drag)
+        self.pad.bind("<ButtonRelease-1>", self._on_pad_release)
+        self._pad_dot = self.pad.create_oval(0, 0, 0, 0, fill="#4da3ff", outline="")
+        self._render_pad()
 
         ttk.Checkbutton(
             send, text="Live jog while dragging (throttled ~25 Hz)", variable=self.live_jog_var
-        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
-        ttk.Button(send, text="Send", command=self._send_command).grid(row=2, column=4, sticky="e", pady=(8, 0))
+        ttk.Button(send, text="Send", command=self._send_command).grid(row=4, column=1, sticky="w", pady=(8, 0))
 
-        ttk.Separator(send, orient="horizontal").grid(row=3, column=0, columnspan=5, sticky="ew", pady=8)
+        ttk.Separator(send, orient="horizontal").grid(row=5, column=0, columnspan=5, sticky="ew", pady=8)
 
         self.light_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             send, text="Light on (relay) — sent with every command below", variable=self.light_var
-        ).grid(row=4, column=0, columnspan=3, sticky="w")
+        ).grid(row=6, column=0, columnspan=3, sticky="w")
         ttk.Button(send, text="Apply Light Only", command=self._send_light_only).grid(
-            row=4, column=4, sticky="e"
+            row=6, column=4, sticky="e"
         )
 
         log_frame = ttk.LabelFrame(self.root, text="Serial log", padding=8)
@@ -210,14 +223,40 @@ class App:
             return [int(iid) for iid in selected]
         return [int(self.node_var.get())]
 
-    def _on_scale_move(self, value_str):
-        angle = round(float(value_str), 1)
-        self.angle_var.set(angle)
+    # ---------- XY pad ----------
+    def _render_pad(self):
+        """Draws the dot where the current X/Y entries point."""
+        try:
+            x, y = float(self.x_var.get()), float(self.y_var.get())
+        except (tk.TclError, ValueError):
+            return
+        span = PAD_ANGLE_MAX - PAD_ANGLE_MIN
+        fx = min(1.0, max(0.0, (x - PAD_ANGLE_MIN) / span))
+        fy = min(1.0, max(0.0, (y - PAD_ANGLE_MIN) / span))
+        cx = fx * PAD_SIZE
+        cy = (1.0 - fy) * PAD_SIZE  # screen up = higher Y
+        r = 7
+        self.pad.coords(self._pad_dot, cx - r, cy - r, cx + r, cy + r)
+
+    def _on_pad_drag(self, event):
+        span = PAD_ANGLE_MAX - PAD_ANGLE_MIN
+        fx = min(1.0, max(0.0, event.x / PAD_SIZE))
+        fy = min(1.0, max(0.0, event.y / PAD_SIZE))
+        self.x_var.set(round(PAD_ANGLE_MIN + fx * span, 1))
+        self.y_var.set(round(PAD_ANGLE_MAX - fy * span, 1))
+        self._render_pad()
         if self.live_jog_var.get() and self.link.is_open:
             now = time.monotonic()
             if now - self._jog_last_sent >= JOG_SEND_INTERVAL_S:
                 self._jog_last_sent = now
                 self._send_command(quiet=True)
+
+    def _on_pad_release(self, _event):
+        # The throttle can swallow the last position mid-drag; send it once
+        # more so the head ends exactly where the pointer was let go.
+        if self.live_jog_var.get() and self.link.is_open:
+            self._jog_last_sent = 0.0
+            self._send_command(quiet=True)
 
     def _send_command(self, quiet=False):
         if not self.link.is_open:
@@ -226,9 +265,10 @@ class App:
             return
         try:
             targets = self._resolve_targets()
-            angle = float(self.angle_var.get())
+            x = float(self.x_var.get())
+            y = float(self.y_var.get())
         except (tk.TclError, ValueError):
-            messagebox.showerror("Invalid input", "Node ID and angle must be numbers.")
+            messagebox.showerror("Invalid input", "Node ID and angles must be numbers.")
             return
         # A multi-node selection is a client-side fan-out: one JSON line per
         # target, the wire protocol itself only ever addresses one id (or 0
@@ -236,7 +276,7 @@ class App:
         relay_on = bool(self.light_var.get())
         for node_id in targets:
             try:
-                line = self.link.send({"node": node_id, "angle": angle, "relay": relay_on})
+                line = self.link.send({"node": node_id, "x": x, "y": y, "relay": relay_on})
             except (RuntimeError, serial.SerialException, OSError) as exc:
                 messagebox.showerror("Send failed", str(exc))
                 return
@@ -255,18 +295,21 @@ class App:
             return
         try:
             targets = self._resolve_targets()
-            fallback_angle = float(self.angle_var.get())
+            fallback_x = float(self.x_var.get())
+            fallback_y = float(self.y_var.get())
         except (tk.TclError, ValueError):
-            messagebox.showerror("Invalid input", "Node ID and angle must be numbers.")
+            messagebox.showerror("Invalid input", "Node ID and angles must be numbers.")
             return
         relay_on = bool(self.light_var.get())
         for node_id in targets:
             known = self.nodes.get(node_id, {})
             # Broadcast (0) is never in the heartbeat table, and a node we
-            # haven't heard from yet isn't either — fall back to the angle box.
-            angle = known.get("angle", fallback_angle)
+            # haven't heard from yet isn't either — fall back to the entries.
+            x = known.get("x", fallback_x)
+            y = known.get("y", fallback_y)
             try:
-                line = self.link.send({"node": node_id, "angle": round(angle, 1), "relay": relay_on})
+                line = self.link.send({"node": node_id, "x": round(x, 1), "y": round(y, 1),
+                                       "relay": relay_on})
             except (RuntimeError, serial.SerialException, OSError) as exc:
                 messagebox.showerror("Send failed", str(exc))
                 return
@@ -322,7 +365,8 @@ class App:
             self.node_tree.insert(
                 "", "end", iid=str(node_id), text=str(node_id),
                 values=(
-                    f"{n.get('angle', 0):.1f}°",
+                    f"{n.get('x', 0):.1f}°",
+                    f"{n.get('y', 0):.1f}°",
                     "on" if n.get("relay") else "off",
                     f"{age_s:.1f}s ago",
                 ),

@@ -2,16 +2,17 @@
 
 #include <ESP32Servo.h>
 #include <stdint.h>
-#include "IAngleSink.h"
 
-class ServoController : public IAngleSink {
+// One servo on one pin, with its own calibration. A pan/tilt head owns two of
+// these — see ServoPair, which is what PlaybackEngine actually drives.
+class ServoController {
 public:
   void begin(uint8_t pin, uint16_t minUs, uint16_t maxUs, float minAngle, float maxAngle, bool invert = false);
 
   // Clamps to the calibrated angle range and writes the pulse.
-  void writeAngle(float degrees) override;
+  void writeAngle(float degrees);
 
-  float getAngle() const override { return currentAngle_; }
+  float getAngle() const { return currentAngle_; }
 
   void setCalibration(uint16_t minUs, uint16_t maxUs, float minAngle, float maxAngle);
 

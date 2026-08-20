@@ -2,12 +2,12 @@
 
 #include <vector>
 
-#include "IAngleSink.h"
+#include "IMotionSink.h"
 #include "IRelaySink.h"
 #include "NetworkLink.h"
 #include "Config.h"
 
-// Master-only IAngleSink: instead of a local PWM pulse, "moving" means
+// Master-only IMotionSink: instead of local PWM pulses, "moving" means
 // broadcasting an ESP-NOW CMD to whichever Node(s) are currently selected —
 // all of them, or an explicit list. Lets PlaybackEngine's existing
 // jog/pattern/sequence logic drive remote Nodes from the Master's own web UI
@@ -17,16 +17,18 @@
 // It's the relay sink too, for the same reason: on a Master the light toggle
 // has to reach the selected Node(s) rather than the Master's own D7 pin, so
 // it rides along on the very same CMD packets the angle does.
-class NetworkAngleSink : public IAngleSink, public IRelaySink {
+class NetworkMotionSink : public IMotionSink, public IRelaySink {
 public:
   void begin(NetworkLink *network) { network_ = network; }
 
-  void writeAngle(float degrees) override {
-    lastAngle_ = degrees;
-    sendToTargets(degrees);
+  void writeAngles(float xDeg, float yDeg) override {
+    lastX_ = xDeg;
+    lastY_ = yDeg;
+    sendToTargets(xDeg, yDeg);
   }
 
-  float getAngle() const override { return lastAngle_; }
+  float getX() const override { return lastX_; }
+  float getY() const override { return lastY_; }
 
   void writeRelay(bool on) override {
     if (on == relayOn_) return;
@@ -37,7 +39,7 @@ public:
     // currently-selected target(s) are touched: the Master tracks relay state
     // per target, so this can't disturb a Node that some other control (a
     // joystick button, a PC tool) is switching independently.
-    sendToTargets(lastAngle_);
+    sendToTargets(lastX_, lastY_);
   }
 
   bool relayState() const override { return relayOn_; }
@@ -53,18 +55,19 @@ public:
   }
 
 private:
-  void sendToTargets(float degrees) {
+  void sendToTargets(float xDeg, float yDeg) {
     if (!network_) return;
     if (broadcastAll_ || targets_.empty()) {
-      network_->sendCommand(NET_BROADCAST_NODE, degrees, relayOn_);
+      network_->sendCommand(NET_BROADCAST_NODE, xDeg, yDeg, relayOn_);
     } else {
-      for (uint8_t id : targets_) network_->sendCommand(id, degrees, relayOn_);
+      for (uint8_t id : targets_) network_->sendCommand(id, xDeg, yDeg, relayOn_);
     }
   }
 
   NetworkLink *network_ = nullptr;
   bool broadcastAll_ = true;
   std::vector<uint8_t> targets_;
-  float lastAngle_ = 0.0f;
+  float lastX_ = 0.0f;
+  float lastY_ = 0.0f;
   bool relayOn_ = false;
 };

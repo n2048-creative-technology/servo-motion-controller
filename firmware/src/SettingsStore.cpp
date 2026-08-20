@@ -15,7 +15,8 @@ void SettingsStore::factoryDefaults() {
   settings_ = PersistedSettings{};
   generateDefaultSsid(settings_.apSsid, sizeof(settings_.apSsid));
   strncpy(settings_.apPassword, AP_DEFAULT_PASSWORD, sizeof(settings_.apPassword) - 1);
-  settings_.autostartPattern = PatternParams{};
+  settings_.autostartPatternX = PatternParams{};
+  settings_.autostartPatternY = PatternParams{};
 
   // Derive a default node id from the MAC so freshly-flashed boards don't all
   // collide on id 1 before the user assigns one in Settings.

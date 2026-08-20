@@ -9,10 +9,10 @@
 #include "PlaybackEngine.h"
 #include "SequenceStore.h"
 #include "SettingsStore.h"
-#include "ServoController.h"
+#include "ServoPair.h"
 #include "RelayController.h"
 #include "NetworkLink.h"
-#include "IAngleSink.h"
+#include "IMotionSink.h"
 #include "Config.h"
 
 namespace {
@@ -107,18 +107,47 @@ void writePatternParams(JsonObject obj, const PatternParams &p) {
   obj["max_speed_dps"] = p.randMaxSpeedDps;
 }
 
+void writeServoCalibration(JsonObject obj, const ServoCalibration &c, uint8_t pin) {
+  obj["pin"] = pin;
+  obj["min_us"] = c.minUs;
+  obj["max_us"] = c.maxUs;
+  obj["min_angle"] = c.minAngle;
+  obj["max_angle"] = c.maxAngle;
+  obj["center_angle"] = c.centerAngle;
+  obj["invert"] = c.invert;
+}
+
+// Applies whichever fields are present to one axis, pushing them straight to
+// that servo. Returns true if anything that affects travel changed, so the
+// caller can re-derive the pattern limits once for both axes.
+bool applyServoCalibration(JsonVariant json, ServoCalibration &c, ServoController &servo) {
+  if (!json.is<JsonObject>()) return false;
+  bool changed = false;
+  if (json["min_us"].is<uint16_t>()) { c.minUs = json["min_us"].as<uint16_t>(); changed = true; }
+  if (json["max_us"].is<uint16_t>()) { c.maxUs = json["max_us"].as<uint16_t>(); changed = true; }
+  if (json["min_angle"].is<float>()) { c.minAngle = json["min_angle"].as<float>(); changed = true; }
+  if (json["max_angle"].is<float>()) { c.maxAngle = json["max_angle"].as<float>(); changed = true; }
+  if (json["center_angle"].is<float>()) c.centerAngle = json["center_angle"].as<float>();
+  if (changed) servo.setCalibration(c.minUs, c.maxUs, c.minAngle, c.maxAngle);
+  if (json["invert"].is<bool>()) {
+    c.invert = json["invert"].as<bool>();
+    servo.setInvert(c.invert);
+  }
+  return changed;
+}
+
 } // namespace
 
 void WebApi::begin(PlaybackEngine *playback, SequenceStore *sequence, SettingsStore *settingsStore,
-                    ServoController *servo, RelayController *relay, NetworkLink *network,
-                    IAngleSink *angleSink, const IPAddress &apIp) {
+                    ServoPair *servos, RelayController *relay, NetworkLink *network,
+                    IMotionSink *motionSink, const IPAddress &apIp) {
   playback_ = playback;
   sequence_ = sequence;
   settingsStore_ = settingsStore;
-  servo_ = servo;
+  servos_ = servos;
   relay_ = relay;
   network_ = network;
-  angleSink_ = angleSink;
+  motionSink_ = motionSink;
 
   dns_.start(DNS_PORT, "*", apIp);
 
@@ -156,7 +185,11 @@ String WebApi::buildStatusJson() {
   JsonDocument doc;
   doc["type"] = "status";
   doc["mode"] = modeToString(playback_->mode());
-  doc["angle"] = angleSink_->getAngle();
+  doc["x"] = motionSink_->getX();
+  doc["y"] = motionSink_->getY();
+  // Deprecated alias for X, kept so anything written against the
+  // single-servo API keeps reading a sensible value.
+  doc["angle"] = motionSink_->getX();
   doc["uptime_ms"] = millis();
   doc["free_heap"] = ESP.getFreeHeap();
   doc["firmware_version"] = FIRMWARE_VERSION;
@@ -196,8 +229,17 @@ void WebApi::onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, Aws
   if (err) return;
 
   const char *cmd = doc["cmd"] | "";
-  if (strcmp(cmd, "jog") == 0 && doc["angle"].is<float>()) {
-    playback_->onJog(doc["angle"].as<float>(), millis());
+  if (strcmp(cmd, "jog") == 0) {
+    // The trackpad sends both axes together; "angle" is still read as X for
+    // anything written against the single-servo API. An axis that isn't sent
+    // holds its current position rather than snapping to a default.
+    const float x = doc["x"].is<float>()       ? doc["x"].as<float>()
+                    : doc["angle"].is<float>() ? doc["angle"].as<float>()
+                                               : motionSink_->getX();
+    const float y = doc["y"].is<float>() ? doc["y"].as<float>() : motionSink_->getY();
+    if (doc["x"].is<float>() || doc["y"].is<float>() || doc["angle"].is<float>()) {
+      playback_->onJog(x, y, millis());
+    }
   } else if (strcmp(cmd, "relay") == 0 && doc["on"].is<bool>()) {
     playback_->onRelayToggle(doc["on"].as<bool>());
   }
@@ -241,8 +283,19 @@ void WebApi::setupRoutes() {
 
   server_.addHandler(new AsyncCallbackJsonWebHandler(
       "/api/pattern/start", [this](AsyncWebServerRequest *request, JsonVariant &json) {
-        PatternParams p = parsePatternParams(json, playback_->activePattern());
-        playback_->startPattern(p, millis());
+        // {"x": {...}, "y": {...}} — either may be omitted to leave that axis
+        // on whatever it was last given. A flat body (no x/y objects) is read
+        // as the X axis, so a single-servo-era caller still does something
+        // sensible instead of nothing.
+        PatternParams px = playback_->activePatternX();
+        PatternParams py = playback_->activePatternY();
+        if (json["x"].is<JsonObject>() || json["y"].is<JsonObject>()) {
+          if (json["x"].is<JsonObject>()) px = parsePatternParams(json["x"], px);
+          if (json["y"].is<JsonObject>()) py = parsePatternParams(json["y"], py);
+        } else {
+          px = parsePatternParams(json, px);
+        }
+        playback_->startPattern(px, py, millis());
         request->send(200, "application/json", "{\"ok\":true}");
       }));
 
@@ -253,8 +306,14 @@ void WebApi::setupRoutes() {
 
   server_.addHandler(new AsyncCallbackJsonWebHandler(
       "/api/manual/jog", [this](AsyncWebServerRequest *request, JsonVariant &json) {
-        if (json["angle_deg"].is<float>()) {
-          playback_->onJog(json["angle_deg"].as<float>(), millis());
+        const bool hasX = json["x_deg"].is<float>() || json["angle_deg"].is<float>();
+        const bool hasY = json["y_deg"].is<float>();
+        if (hasX || hasY) {
+          const float x = json["x_deg"].is<float>()       ? json["x_deg"].as<float>()
+                          : json["angle_deg"].is<float>() ? json["angle_deg"].as<float>()
+                                                          : motionSink_->getX();
+          const float y = hasY ? json["y_deg"].as<float>() : motionSink_->getY();
+          playback_->onJog(x, y, millis());
         }
         request->send(200, "application/json", "{\"ok\":true}");
       }));
@@ -355,12 +414,8 @@ void WebApi::setupRoutes() {
     ap["has_password"] = strlen(s.apPassword) > 0;
 
     JsonObject servoObj = doc["servo"].to<JsonObject>();
-    servoObj["min_us"] = s.servoMinUs;
-    servoObj["max_us"] = s.servoMaxUs;
-    servoObj["min_angle"] = s.servoMinAngle;
-    servoObj["max_angle"] = s.servoMaxAngle;
-    servoObj["center_angle"] = s.servoCenterAngle;
-    servoObj["invert"] = s.servoInvert;
+    writeServoCalibration(servoObj["x"].to<JsonObject>(), s.servoX, SERVO_X_PIN);
+    writeServoCalibration(servoObj["y"].to<JsonObject>(), s.servoY, SERVO_Y_PIN);
 
     JsonObject relayObj = doc["relay"].to<JsonObject>();
     relayObj["pin"] = relay_ ? relay_->pin() : RELAY_PIN;
@@ -372,7 +427,9 @@ void WebApi::setupRoutes() {
     autostart["target"] = s.autostartTarget == AutostartTarget::PATTERN   ? "pattern"
                            : s.autostartTarget == AutostartTarget::SEQUENCE ? "sequence"
                                                                              : "none";
-    writePatternParams(autostart["pattern"].to<JsonObject>(), s.autostartPattern);
+    JsonObject autoPattern = autostart["pattern"].to<JsonObject>();
+    writePatternParams(autoPattern["x"].to<JsonObject>(), s.autostartPatternX);
+    writePatternParams(autoPattern["y"].to<JsonObject>(), s.autostartPatternY);
     autostart["sequence_name"] = s.autostartSequenceName;
 
     JsonObject network = doc["network"].to<JsonObject>();
@@ -398,35 +455,16 @@ void WebApi::setupRoutes() {
           }
         }
 
+        // Each axis is applied independently, so saving one doesn't disturb
+        // the other.
         bool calibrationChanged = false;
-        if (json["servo"]["min_us"].is<uint16_t>()) {
-          s.servoMinUs = json["servo"]["min_us"].as<uint16_t>();
-          calibrationChanged = true;
-        }
-        if (json["servo"]["max_us"].is<uint16_t>()) {
-          s.servoMaxUs = json["servo"]["max_us"].as<uint16_t>();
-          calibrationChanged = true;
-        }
-        if (json["servo"]["min_angle"].is<float>()) {
-          s.servoMinAngle = json["servo"]["min_angle"].as<float>();
-          calibrationChanged = true;
-        }
-        if (json["servo"]["max_angle"].is<float>()) {
-          s.servoMaxAngle = json["servo"]["max_angle"].as<float>();
-          calibrationChanged = true;
-        }
-        if (json["servo"]["center_angle"].is<float>()) {
-          s.servoCenterAngle = json["servo"]["center_angle"].as<float>();
-        }
+        calibrationChanged |= applyServoCalibration(json["servo"]["x"], s.servoX, servos_->x());
+        calibrationChanged |= applyServoCalibration(json["servo"]["y"], s.servoY, servos_->y());
         if (calibrationChanged) {
-          servo_->setCalibration(s.servoMinUs, s.servoMaxUs, s.servoMinAngle, s.servoMaxAngle);
           // Keeps the RANDOM pattern's targets inside the new travel limits
           // without waiting for a reboot.
-          playback_->setAngleLimits(s.servoMinAngle, s.servoMaxAngle);
-        }
-        if (json["servo"]["invert"].is<bool>()) {
-          s.servoInvert = json["servo"]["invert"].as<bool>();
-          servo_->setInvert(s.servoInvert);
+          playback_->setAngleLimits(s.servoX.minAngle, s.servoX.maxAngle, s.servoY.minAngle,
+                                    s.servoY.maxAngle);
         }
 
         if (json["relay"]["active_low"].is<bool>()) {
@@ -443,8 +481,11 @@ void WebApi::setupRoutes() {
                                : strcmp(t, "sequence") == 0 ? AutostartTarget::SEQUENCE
                                                              : AutostartTarget::NONE;
         }
-        if (json["autostart"]["pattern"].is<JsonObject>()) {
-          s.autostartPattern = parsePatternParams(json["autostart"]["pattern"], s.autostartPattern);
+        if (json["autostart"]["pattern"]["x"].is<JsonObject>()) {
+          s.autostartPatternX = parsePatternParams(json["autostart"]["pattern"]["x"], s.autostartPatternX);
+        }
+        if (json["autostart"]["pattern"]["y"].is<JsonObject>()) {
+          s.autostartPatternY = parsePatternParams(json["autostart"]["pattern"]["y"], s.autostartPatternY);
         }
         if (json["autostart"]["sequence_name"].is<const char *>()) {
           strncpy(s.autostartSequenceName, json["autostart"]["sequence_name"].as<const char *>(),
@@ -474,7 +515,8 @@ void WebApi::setupRoutes() {
       if (!known[i].inUse) continue;
       JsonObject n = nodes.add<JsonObject>();
       n["id"] = known[i].id;
-      n["angle"] = known[i].angleDeg;
+      n["x"] = known[i].angleX;
+      n["y"] = known[i].angleY;
       n["relay"] = known[i].relayOn;
       n["age_ms"] = now - known[i].lastSeenMs;
     }
@@ -485,9 +527,9 @@ void WebApi::setupRoutes() {
 
   server_.on("/api/network/targets", HTTP_GET, [this](AsyncWebServerRequest *request) {
     JsonDocument doc;
-    doc["broadcast_all"] = angleSink_->targetsBroadcastAll();
+    doc["broadcast_all"] = motionSink_->targetsBroadcastAll();
     JsonArray ids = doc["node_ids"].to<JsonArray>();
-    for (size_t i = 0; i < angleSink_->targetCount(); i++) ids.add(angleSink_->targetAt(i));
+    for (size_t i = 0; i < motionSink_->targetCount(); i++) ids.add(motionSink_->targetAt(i));
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
@@ -508,7 +550,7 @@ void WebApi::setupRoutes() {
             if (id >= 0 && id <= NET_NODE_ID_MAX) ids.push_back(static_cast<uint8_t>(id));
           }
         }
-        angleSink_->setTargets(broadcastAll, ids.data(), ids.size());
+        motionSink_->setTargets(broadcastAll, ids.data(), ids.size());
         request->send(200, "application/json", "{\"ok\":true}");
       }));
 

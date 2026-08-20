@@ -14,11 +14,19 @@ never drives a locally-attached servo itself.
 
 **Move a node**
 ```json
-{"node": 3, "angle": 120.5}
+{"node": 3, "x": 120.5, "y": 90.0}
 ```
 - `node`: target Node's id (`0`–`250`). `0` broadcasts to every Node.
-- `angle`: target angle in degrees, clamped by each Node's own servo
-  calibration (Settings → Servo Calibration on that board).
+- `x`: pan angle (D10) in degrees, clamped by that Node's own X calibration.
+- `y`: tilt angle (D3) in degrees, clamped by that Node's own Y calibration.
+- `angle`: accepted as a synonym for `x`, so scripts written for the
+  single-servo firmware keep working.
+
+**An axis you leave out holds its last commanded position** rather than
+snapping to a default, so a tool that only drives pan never disturbs tilt.
+Both axes travel in one packet: splitting them would let a Node act on half a
+move, dog-legging its way to a diagonal — and recording that dog-leg if a
+capture is running.
 - `relay` *(optional, boolean)*: also switch that Node's relay/light output
   on D7. **Omit it to leave the light alone** — the Master remembers the last
   state sent to each target and re-sends that, so a tool that knows nothing
@@ -55,7 +63,7 @@ Node's own flash under a name, playable standalone via that Node's Settings
 ```json
 {"cmd": "remote_record_start", "node": 3}
 ```
-Then stream ordinary move commands (`{"node":3,"angle":...}`, above) at a
+Then stream ordinary move commands (`{"node":3,"x":...,"y":...}`, above) at a
 steady real-time pace — the Node is now in RECORDING mode, so every command
 that reaches it both moves its servo *and* gets captured. When done:
 ```json
@@ -99,10 +107,10 @@ anyway rather than blocking on an unreliable link.
 ## Replies (Master → PC)
 
 - Move command: `{"ok":true}` or `{"ok":false,"error":"..."}`
-- `list`: `{"type":"nodes","nodes":[{"id":3,"angle":120.5,"relay":true,"age_ms":840}, ...]}`
-  — `relay` is that Node's *actual* light state, reported in its own
-  heartbeat, so it reflects the light however it was switched (a Master
-  command, the Node's own web UI, or its sequence playback).
+- `list`: `{"type":"nodes","nodes":[{"id":3,"x":120.5,"y":90.0,"relay":true,"age_ms":840}, ...]}`
+  — `x`, `y` and `relay` are that Node's *actual* state, reported in its own
+  heartbeat, so they reflect the head however it was moved or switched (a
+  Master command, the Node's own web UI, or its sequence playback).
 - `remote_record_start`/`remote_record_stop`: `{"ok":true}` once the ESP-NOW
   send itself succeeded — *not* confirmation the Node actually saved
   anything, that's the separate asynchronous `upload_result` below.
@@ -163,6 +171,12 @@ counter reset to 0. Non-finite angles (a corrupted payload) are dropped the
 same way, as cheap insurance against ever computing a garbage pulse width.
 
 This is why **Master and every Node must run matching firmware** — a
+A Node can hold **6min40s** of recording (8000 points at 50ms). That came
+down from 10 minutes when each point gained its Y axis: the point grew 8 → 12
+bytes, and the count was cut to keep the fixed buffer at the same 96KB rather
+than spend another 48KB of the C3's RAM. See `MAX_SEQ_POINTS` in
+`firmware/include/Config.h`.
+
 `NET_PACKET_VERSION` mismatch (bumped whenever the packet layout changes,
 as it did for this ordering fix) makes them silently ignore each other
 rather than misinterpret each other's bytes.
@@ -215,8 +229,8 @@ import serial
 
 port = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
 
-def move(node_id: int, angle: float) -> dict:
-    port.write((json.dumps({"node": node_id, "angle": angle}) + "\n").encode())
+def move(node_id: int, x: float, y: float) -> dict:
+    port.write((json.dumps({"node": node_id, "x": x, "y": y}) + "\n").encode())
     return json.loads(port.readline())
 
 def list_nodes() -> dict:

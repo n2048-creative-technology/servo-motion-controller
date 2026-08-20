@@ -11,8 +11,16 @@ void ServoController::begin(uint8_t pin, uint16_t minUs, uint16_t maxUs, float m
   maxAngle_ = maxAngle;
   invert_ = invert;
 
-  // One LEDC timer is enough for a single servo on the C3.
-  ESP32PWM::allocateTimer(0);
+  // One LEDC timer serves both servos of a pan/tilt head: they share the same
+  // 50Hz, which is exactly what a shared timer supports, and each still gets
+  // its own LEDC channel (the C3 has 6). Allocated once rather than per
+  // instance — calling it again per servo would be harmless today, but it's a
+  // global side effect and doesn't belong in a per-object begin().
+  static bool timerAllocated = false;
+  if (!timerAllocated) {
+    ESP32PWM::allocateTimer(0);
+    timerAllocated = true;
+  }
   servo_.setPeriodHertz(50);
   servo_.attach(pin_, minUs_, maxUs_);
   attached_ = true;

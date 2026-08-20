@@ -69,14 +69,10 @@ uint32_t randomIntervalMs(uint32_t lo, uint32_t hi) {
 // and reaches each target gradually instead of stepping.
 float smoothstep(float u) { return u * u * (3.0f - 2.0f * u); }
 
-// Picks the next target and how long moving there should take, then schedules
-// the move after it. Called once per cycle from computeRandomAngle().
-void planNextRandomMove(const PatternParams &params, RandomPatternState &state, float minDeg, float maxDeg) {
-  state.fromDeg = state.toDeg;
-  state.toDeg = randomInRange(minDeg, maxDeg);
-
+// How long an eased move of `distance` degrees must take to stay within this
+// pattern's speed cap.
+uint32_t moveDurationFor(const PatternParams &params, float distance) {
   const float speed = clampValue(params.randMaxSpeedDps, PATTERN_RANDOM_MIN_SPEED_DPS, PATTERN_RANDOM_MAX_SPEED_DPS);
-  const float distance = fabsf(state.toDeg - state.fromDeg);
   // Smoothstep's peak velocity is 1.5x its average, so stretch the move by
   // that factor: what the user sets as "max speed" is the actual peak the
   // servo sees mid-move, not an average it overshoots.
@@ -84,8 +80,11 @@ void planNextRandomMove(const PatternParams &params, RandomPatternState &state, 
   // make the move finish fractionally early, i.e. fractionally faster than
   // the speed cap the user set.
   uint32_t duration = static_cast<uint32_t>(ceilf((1.5f * distance / speed) * 1000.0f));
-  if (duration < PATTERN_RANDOM_MIN_MOVE_MS) duration = PATTERN_RANDOM_MIN_MOVE_MS;
+  return duration < PATTERN_RANDOM_MIN_MOVE_MS ? PATTERN_RANDOM_MIN_MOVE_MS : duration;
+}
 
+// Draws this cycle's interval, tolerating min/max entered the wrong way round.
+uint32_t drawInterval(const PatternParams &params) {
   uint32_t lo = params.randMinIntervalMs;
   uint32_t hi = params.randMaxIntervalMs;
   if (hi < lo) {  // user entered them backwards — treat as an unordered pair
@@ -93,16 +92,63 @@ void planNextRandomMove(const PatternParams &params, RandomPatternState &state, 
     lo = hi;
     hi = swap;
   }
-  uint32_t interval = randomIntervalMs(lo, hi);
-  // The interval covers the whole cycle (move + hold). A long move under a
-  // short interval would otherwise be cut off mid-travel by the next target,
-  // which is exactly the discontinuity the easing exists to avoid.
-  const uint32_t minCycle = duration + PATTERN_RANDOM_MIN_SETTLE_MS;
-  if (interval < minCycle) interval = minCycle;
+  return randomIntervalMs(lo, hi);
+}
 
+// Picks one axis's next target; returns the move duration it needs.
+uint32_t chooseTarget(const PatternParams &params, RandomPatternState &state, float minDeg, float maxDeg) {
+  state.fromDeg = state.toDeg;
+  state.toDeg = randomInRange(minDeg, maxDeg);
+  return moveDurationFor(params, fabsf(state.toDeg - state.fromDeg));
+}
+
+// The interval covers the whole cycle (move + hold). A long move under a short
+// interval would otherwise be cut off mid-travel by the next target, which is
+// exactly the discontinuity the easing exists to avoid.
+uint32_t cycleFor(uint32_t interval, uint32_t duration) {
+  const uint32_t minCycle = duration + PATTERN_RANDOM_MIN_SETTLE_MS;
+  return interval < minCycle ? minCycle : interval;
+}
+
+// Where an axis sits partway through its current eased move.
+float easedPosition(const RandomPatternState &state, uint32_t t_ms) {
+  const uint32_t elapsedInMove = t_ms - state.moveStartMs;
+  if (state.moveDurationMs == 0 || elapsedInMove >= state.moveDurationMs) {
+    return state.toDeg; // arrived: hold here until the next move is due
+  }
+  const float u = static_cast<float>(elapsedInMove) / static_cast<float>(state.moveDurationMs);
+  return state.fromDeg + (state.toDeg - state.fromDeg) * smoothstep(u);
+}
+
+// Picks the next target and how long moving there should take, then schedules
+// the move after it. Called once per cycle from computeRandomAngle().
+void planNextRandomMove(const PatternParams &params, RandomPatternState &state, float minDeg, float maxDeg) {
+  const uint32_t duration = chooseTarget(params, state, minDeg, maxDeg);
+  const uint32_t interval = cycleFor(drawInterval(params), duration);
   state.moveStartMs = state.nextMoveMs;
   state.moveDurationMs = duration;
   state.nextMoveMs = state.moveStartMs + interval;
+}
+
+// Both axes at once, on one shared schedule. The X axis's interval settings
+// own that schedule (Y's are ignored while linked) — one head can only look
+// somewhere new at one rate, and taking the pair from one axis is easier to
+// reason about than combining two ranges. Both axes ease over the same
+// duration, set by whichever needs longer, so neither breaks its own speed cap
+// and the head travels a straight line rather than dog-legging.
+void planNextRandom2D(const PatternParams &paramsX, const PatternParams &paramsY, Random2DState &state,
+                      float minX, float maxX, float minY, float maxY) {
+  const uint32_t durX = chooseTarget(paramsX, state.x, minX, maxX);
+  const uint32_t durY = chooseTarget(paramsY, state.y, minY, maxY);
+  const uint32_t duration = durX > durY ? durX : durY;
+  const uint32_t interval = cycleFor(drawInterval(paramsX), duration);
+
+  state.x.moveStartMs = state.x.nextMoveMs;
+  state.y.moveStartMs = state.x.moveStartMs; // one schedule, not two
+  state.x.moveDurationMs = duration;
+  state.y.moveDurationMs = duration;
+  state.x.nextMoveMs = state.x.moveStartMs + interval;
+  state.y.nextMoveMs = state.x.nextMoveMs;
 }
 
 } // namespace
@@ -172,12 +218,45 @@ float computeRandomAngle(const PatternParams &params, RandomPatternState &state,
     planNextRandomMove(params, state, minDeg, maxDeg);
   }
 
-  const uint32_t elapsedInMove = t_ms - state.moveStartMs;
-  if (state.moveDurationMs == 0 || elapsedInMove >= state.moveDurationMs) {
-    return state.toDeg; // arrived: hold here until the next move is due
+  return easedPosition(state, t_ms);
+}
+
+void resetRandom2D(Random2DState &state, float currentX, float currentY) {
+  resetRandom(state.x, currentX);
+  resetRandom(state.y, currentY);
+}
+
+void computeRandom2D(const PatternParams &paramsX, const PatternParams &paramsY, Random2DState &state,
+                     uint32_t t_ms, float minX, float maxX, float minY, float maxY, float *outX,
+                     float *outY) {
+  if (maxX < minX) { const float t = minX; minX = maxX; maxX = t; }
+  if (maxY < minY) { const float t = minY; minY = maxY; maxY = t; }
+
+  if (!state.x.initialized || !state.y.initialized) {
+    state.x.initialized = true;
+    state.y.initialized = true;
+    state.x.fromDeg = clampValue(state.x.fromDeg, minX, maxX);
+    state.y.fromDeg = clampValue(state.y.fromDeg, minY, maxY);
+    state.x.toDeg = state.x.fromDeg;
+    state.y.toDeg = state.y.fromDeg;
+    state.x.moveStartMs = t_ms;
+    state.y.moveStartMs = t_ms;
+    state.x.moveDurationMs = 0;
+    state.y.moveDurationMs = 0;
+    state.x.nextMoveMs = t_ms; // first move is planned on this very tick
+    state.y.nextMoveMs = t_ms;
   }
-  const float u = static_cast<float>(elapsedInMove) / static_cast<float>(state.moveDurationMs);
-  return state.fromDeg + (state.toDeg - state.fromDeg) * smoothstep(u);
+
+  // Signed comparison so this keeps scheduling across millis()' ~49-day wrap,
+  // and a loop so a delayed tick catches up rather than stalling — same
+  // reasoning as the single-axis path above. Only X's schedule is consulted:
+  // planNextRandom2D keeps both in lockstep.
+  while (static_cast<int32_t>(t_ms - state.x.nextMoveMs) >= 0) {
+    planNextRandom2D(paramsX, paramsY, state, minX, maxX, minY, maxY);
+  }
+
+  if (outX) *outX = easedPosition(state.x, t_ms);
+  if (outY) *outY = easedPosition(state.y, t_ms);
 }
 
 bool isValidType(uint8_t rawType) {

@@ -69,12 +69,14 @@ void SequenceStore::startRecording() {
   recording_ = true;
   count_ = 0;
   durationMs_ = 0;
+  hasYTrack_ = true; // anything captured from here on records both axes
 }
 
-void SequenceStore::captureTick(float angleDeg, bool relayOn, uint32_t elapsedMs) {
+void SequenceStore::captureTick(float xDeg, float yDeg, bool relayOn, uint32_t elapsedMs) {
   if (!recording_ || count_ >= MAX_SEQ_POINTS) return;
   points_[count_].t_ms = elapsedMs;
-  points_[count_].angle_decideg = static_cast<int16_t>(angleDeg * 10.0f);
+  points_[count_].x_decideg = static_cast<int16_t>(xDeg * 10.0f);
+  points_[count_].y_decideg = static_cast<int16_t>(yDeg * 10.0f);
   points_[count_].flags = relayOn ? SEQ_FLAG_RELAY_ON : 0;
   points_[count_].reserved = 0;
   count_++;
@@ -121,6 +123,7 @@ bool SequenceStore::loadNamed(const char *name) {
   loaded_ = false;
   count_ = 0;
   durationMs_ = 0;
+  hasYTrack_ = true;
 
   char safeName[SEQ_NAME_MAX_LEN + 1];
   if (!sanitizeName(name, safeName, sizeof(safeName))) return false;
@@ -143,21 +146,24 @@ bool SequenceStore::loadNamed(const char *name) {
     return false;
   }
 
-  const size_t bytesToRead = sizeof(SequencePoint) * header.pointCount;
-  const size_t got = f.read(reinterpret_cast<uint8_t *>(points_), bytesToRead);
-  f.close();
-
-  if (got != bytesToRead) return false;
-
-  if (header.version < 2) {
-    // v1 point records are the same 8 bytes, but their last two are padding
-    // the writer never initialized — reading them as relay flags would replay
-    // an old recording with the light flickering at random.
-    for (uint16_t i = 0; i < header.pointCount; i++) {
-      points_[i].flags = 0;
-      points_[i].reserved = 0;
+  if (header.version < SEQUENCE_FILE_VERSION_XY) {
+    // Pre-Y file: 8-byte records that have to be widened into the 12-byte
+    // in-RAM points, and no tilt data at all to widen them with.
+    if (!readLegacyPoints(f, header.pointCount, header.version)) {
+      f.close();
+      return false;
     }
+    hasYTrack_ = false;
+  } else {
+    const size_t bytesToRead = sizeof(SequencePoint) * header.pointCount;
+    const size_t got = f.read(reinterpret_cast<uint8_t *>(points_), bytesToRead);
+    if (got != bytesToRead) {
+      f.close();
+      return false;
+    }
+    hasYTrack_ = true;
   }
+  f.close();
 
   count_ = header.pointCount;
   durationMs_ = header.durationMs;
@@ -251,9 +257,47 @@ uint8_t SequenceStore::clearAll() {
   return removed;
 }
 
-float SequenceStore::angleAtTime(uint32_t t_ms) const {
-  if (count_ == 0) return 0.0f;
-  if (count_ == 1 || durationMs_ == 0) return points_[0].angle_decideg / 10.0f;
+// v1/v2 files store 8-byte records; the in-RAM point is 12. Read them in
+// batches into a small stack buffer and widen each one, rather than either
+// bloating the RAM budget with a second full-size array or doing one tiny
+// filesystem read per point.
+bool SequenceStore::readLegacyPoints(File &f, uint16_t pointCount, uint16_t fileVersion) {
+  static constexpr uint16_t kBatch = 64;
+  SequencePointV1 batch[kBatch];
+
+  uint16_t done = 0;
+  while (done < pointCount) {
+    const uint16_t want = (pointCount - done) < kBatch ? (pointCount - done) : kBatch;
+    const size_t bytes = sizeof(SequencePointV1) * want;
+    if (f.read(reinterpret_cast<uint8_t *>(batch), bytes) != static_cast<int>(bytes)) return false;
+    for (uint16_t i = 0; i < want; i++) {
+      SequencePoint &dst = points_[done + i];
+      dst.t_ms = batch[i].t_ms;
+      dst.x_decideg = batch[i].angle_decideg;
+      dst.y_decideg = 0; // no tilt track — see hasYTrack()
+      // v1 never initialized the byte v2 later used for relay flags, so
+      // trusting it would replay an old recording with the light flickering
+      // at random.
+      dst.flags = fileVersion >= 2 ? (batch[i].flags & SEQ_FLAG_RELAY_ON) : 0;
+      dst.reserved = 0;
+    }
+    done += want;
+  }
+  return true;
+}
+
+void SequenceStore::sampleAtTime(uint32_t t_ms, float *outX, float *outY, bool *outRelay) const {
+  if (outX) *outX = 0.0f;
+  if (outY) *outY = 0.0f;
+  if (outRelay) *outRelay = false;
+  if (count_ == 0) return;
+
+  if (count_ == 1 || durationMs_ == 0) {
+    if (outX) *outX = points_[0].x_decideg / 10.0f;
+    if (outY) *outY = points_[0].y_decideg / 10.0f;
+    if (outRelay) *outRelay = (points_[0].flags & SEQ_FLAG_RELAY_ON) != 0;
+    return;
+  }
 
   const uint32_t wrapped = t_ms % durationMs_;
 
@@ -261,38 +305,37 @@ float SequenceStore::angleAtTime(uint32_t t_ms) const {
     const SequencePoint &a = points_[i];
     const SequencePoint &b = points_[i + 1];
     if (wrapped >= a.t_ms && wrapped <= b.t_ms) {
-      if (b.t_ms == a.t_ms) return a.angle_decideg / 10.0f;
+      // The relay is held (never blended) from the most recent point at or
+      // before `wrapped` — which is `b` when we've landed exactly on its
+      // timestamp, and `a` anywhere in between. Taking it from `a`
+      // unconditionally would delay every light change by a whole sample
+      // interval, since a switch is recorded at the instant it happens.
+      const SequencePoint &holder = wrapped >= b.t_ms ? b : a;
+      if (outRelay) *outRelay = (holder.flags & SEQ_FLAG_RELAY_ON) != 0;
+      if (b.t_ms == a.t_ms) {
+        if (outX) *outX = a.x_decideg / 10.0f;
+        if (outY) *outY = a.y_decideg / 10.0f;
+        return;
+      }
       const float t = static_cast<float>(wrapped - a.t_ms) / static_cast<float>(b.t_ms - a.t_ms);
-      const float angleA = a.angle_decideg / 10.0f;
-      const float angleB = b.angle_decideg / 10.0f;
-      return angleA + t * (angleB - angleA);
+      if (outX) *outX = (a.x_decideg + t * (b.x_decideg - a.x_decideg)) / 10.0f;
+      if (outY) *outY = (a.y_decideg + t * (b.y_decideg - a.y_decideg)) / 10.0f;
+      return;
     }
   }
 
   // Wrap segment: interpolate from the last recorded point back to the first
-  // point as time loops from durationMs_ back to 0.
+  // as time loops from durationMs_ back to 0.
   const SequencePoint &last = points_[count_ - 1];
   const SequencePoint &first = points_[0];
+  if (outRelay) *outRelay = (last.flags & SEQ_FLAG_RELAY_ON) != 0;
   const uint32_t wrapSpan = durationMs_ - last.t_ms;
-  if (wrapSpan == 0) return last.angle_decideg / 10.0f;
-  const float t = static_cast<float>(wrapped - last.t_ms) / static_cast<float>(wrapSpan);
-  const float angleLast = last.angle_decideg / 10.0f;
-  const float angleFirst = first.angle_decideg / 10.0f;
-  return angleLast + t * (angleFirst - angleLast);
-}
-
-bool SequenceStore::relayAtTime(uint32_t t_ms) const {
-  if (count_ == 0) return false;
-  if (count_ == 1 || durationMs_ == 0) return (points_[0].flags & SEQ_FLAG_RELAY_ON) != 0;
-
-  const uint32_t wrapped = t_ms % durationMs_;
-
-  // Last point at or before `wrapped`; points are captured in time order, so
-  // the first point past it ends the search.
-  uint16_t idx = 0;
-  for (uint16_t i = 0; i < count_; i++) {
-    if (points_[i].t_ms > wrapped) break;
-    idx = i;
+  if (wrapSpan == 0) {
+    if (outX) *outX = last.x_decideg / 10.0f;
+    if (outY) *outY = last.y_decideg / 10.0f;
+    return;
   }
-  return (points_[idx].flags & SEQ_FLAG_RELAY_ON) != 0;
+  const float t = static_cast<float>(wrapped - last.t_ms) / static_cast<float>(wrapSpan);
+  if (outX) *outX = (last.x_decideg + t * (first.x_decideg - last.x_decideg)) / 10.0f;
+  if (outY) *outY = (last.y_decideg + t * (first.y_decideg - last.y_decideg)) / 10.0f;
 }
