@@ -72,6 +72,11 @@ SSID isn't empty and the password (if set) is empty or ≥8 characters.
    servos can comfortably track.
 8. Record while moving both axes and toggling the Light partway through,
    save, then play it back — pan, tilt and light should all replay together.
+9. Tap the saved recording's row in the list — the plot above should switch
+   from the live trace to that recording, and while it plays a thin white
+   playhead should sweep across it in time with the head. (A recording made
+   before this firmware had a tilt axis plots its pan trace only, and says so
+   next to the legend.)
 
 These functional steps require real hardware and have not been run in this
 environment — only the firmware and filesystem-image builds were verified.

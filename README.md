@@ -130,12 +130,15 @@ Three tabs, reachable from the bottom nav:
 
 - **Record** — start/stop recording (captures both servo axes *and* the
   relay's state at a fixed 20 Hz while you aim the head), live trace with one
-  line per axis, save/discard,
+  line per axis, **tap any saved recording to plot it** (with a playhead
+  tracking it while it plays), save/discard,
   and play/stop the saved sequence on a loop. Playback drives the light from
   the recording just as it drives the servo. The trace plots both: the servo
   axes as two lines, and the light as a solid lane along the bottom (with a
   faint wash over the motion it happened during), so you can see at a glance
-  which part of a take was lit.
+  which part of a take was lit. The same plot shows a *saved* recording when
+  you tap its row in the list, downsampled by the board, with a thin white
+  playhead following playback through it.
 
   <img src="images/webui-record.png" alt="Record tab: recording controls and saved sequence" width="300">
 

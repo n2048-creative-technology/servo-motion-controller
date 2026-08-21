@@ -6,7 +6,7 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 
 | Method | Route | Body | Response / notes |
 |---|---|---|---|
-| GET | `/api/status` | — | `{mode, x, y, angle, relay_on, uptime_ms, free_heap, firmware_version, recording:{active,points}, sequence:{present,name,points,duration_ms}}` — `x`/`y` are the two servo axes; `angle` is a deprecated alias for `x` |
+| GET | `/api/status` | — | `{mode, x, y, angle, relay_on, uptime_ms, free_heap, firmware_version, recording:{active,points}, sequence:{present,name,points,duration_ms,playing,position_ms}}` — `x`/`y` are the two servo axes (`angle` is a deprecated alias for `x`); `sequence.position_ms` is how far into the loop playback has got, for a playhead |
 | GET | `/api/patterns` | — | `[{type, label, params: "comma,separated,keys"}]` — drives the UI's generated param forms |
 | POST | `/api/pattern/start` | `{x:{type, period_ms, …}, y:{…}}` | mode → `pattern`, loops until stopped. Either axis may be omitted to leave it as-is; a flat body with no `x`/`y` is applied to X |
 | POST | `/api/pattern/stop` | — | mode → `manual`, holds last angle |
@@ -19,6 +19,7 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 | POST | `/api/record/save` | `{name}` | writes the buffer to `/seq/<name>.bin` (sanitized to `[A-Za-z0-9_-]`, ≤23 chars) |
 | POST | `/api/record/discard` | — | clears the buffer without saving |
 | GET | `/api/sequences` | — | `[{name, points, duration_ms}, ...]` — every sequence saved on this board, local or uploaded via a Master |
+| GET | `/api/sequence/data?name=…&points=…` | — | `{name, duration_ms, has_y, points:[[t_ms,x,y,light], ...]}` — a downsampled view of one saved sequence, for plotting it. `points` caps at 300 (the plot is only ~600px wide); reading never disturbs whatever is currently playing |
 | POST | `/api/sequence/play` | `{name}` | loads and plays that sequence on loop; mode → `sequence` |
 | POST | `/api/sequence/stop` | — | mode → `manual` |
 | POST | `/api/sequence/delete` | `{name}` | removes that sequence file; clears it as "active" first if it was playing |
@@ -42,6 +43,10 @@ Both axes always travel together in one command — one `jog`, one CMD packet,
 one recorded point. Splitting them would let a node act on half a move,
 visibly dog-legging its way to a diagonal and recording that dog-leg if a
 capture is running.
+
+`/api/sequence/data` reports `has_y: false` for a sequence recorded before
+there was a tilt axis — its `y` column is padding, not data, and shouldn't be
+plotted as a flat line at zero.
 
 Sequences recorded before this firmware had a Y axis still load and play:
 their X and light tracks replay as before, and the tilt axis is left where it

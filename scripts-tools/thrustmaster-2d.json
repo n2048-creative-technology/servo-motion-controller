@@ -1,0 +1,38 @@
+{
+  "mappings": [
+    {
+      "kind": "axis",
+      "controller_guid": "03001399b50700001603000010010000",
+      "controller_name": "Mega World USB Game Controllers",
+      "axis_index": 1,
+      "raw_min": -1.0,
+      "raw_max": 0.999969482421875,
+      "node_id": 1,
+      "angle_min": 0.0,
+      "angle_max": 180.0,
+      "invert": false,
+      "target_axis": "y"
+    },
+    {
+      "kind": "axis",
+      "controller_guid": "03001399b50700001603000010010000",
+      "controller_name": "Mega World USB Game Controllers",
+      "axis_index": 0,
+      "raw_min": -1.0,
+      "raw_max": 0.999969482421875,
+      "node_id": 1,
+      "angle_min": 0.0,
+      "angle_max": 180.0,
+      "invert": false,
+      "target_axis": "x"
+    },
+    {
+      "kind": "button",
+      "controller_guid": "03001399b50700001603000010010000",
+      "controller_name": "Mega World USB Game Controllers",
+      "button_index": 0,
+      "node_id": 1,
+      "mode": "toggle"
+    }
+  ]
+}
