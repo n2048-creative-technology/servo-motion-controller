@@ -121,6 +121,15 @@ static constexpr const char *NVS_KEY = "cfg";
 static constexpr uint32_t SETTINGS_MAGIC = 0x53565831; // "1XVS"
 static constexpr uint16_t SETTINGS_VERSION = 6; // v6: per-axis (X/Y) servo calibration + per-axis autostart pattern (older blobs fall back to defaults)
 
+// Network identity (SSID, password, network mode, node id) lives under its
+// own NVS key, deliberately separate from NVS_KEY/SETTINGS_VERSION above —
+// see SettingsStore::loadNetworkIdentity()'s comment. A board's WiFi
+// name/password and its Master/Node role shouldn't reset just because some
+// unrelated settings field (a pattern parameter, a servo calibration value)
+// changed shape and bumped SETTINGS_VERSION.
+static constexpr const char *NET_IDENTITY_NVS_KEY = "netid";
+static constexpr uint32_t NET_IDENTITY_MAGIC = 0x4E455431; // "NET1"
+
 // ---- WiFi AP defaults ----
 static constexpr const char *AP_SSID_PREFIX = "ServoRig-";
 static constexpr const char *AP_DEFAULT_PASSWORD = "servo1234";

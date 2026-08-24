@@ -46,6 +46,7 @@ void setup() {
   delay(200);
   Serial.println();
   Serial.println("[SELFTEST] booting servo-motion-controller");
+  Serial.printf("[SELFTEST] firmware version=%s\n", FIRMWARE_VERSION);
 
   settingsStore.load();
   const PersistedSettings &settings = settingsStore.settings();
@@ -74,11 +75,26 @@ void setup() {
   uint8_t seqCount = sequenceStore.listSequences(seqInfos, SEQ_MAX_LISTED);
   Serial.printf("[SELFTEST] sequences stored: %u\n", seqCount);
 
+  // Keeps the WiFi driver's own AP config (SSID/password/etc, a separate
+  // blob from this project's own "app" NVS namespace) purely in RAM instead
+  // of also writing it to flash on every WiFi.softAP() call. Without this, a
+  // stale copy from a *previous* boot's config can end up fought over with
+  // what's explicitly set below right after — a documented arduino-esp32
+  // gotcha, and confirmed live on this project's own ESP32-S3 hardware: a
+  // correct password was rejected with wpa_supplicant reporting WRONG_KEY
+  // even right after a full chip erase.
+  WiFi.persistent(false);
+
+  // softAP() must run before softAPConfig() — the reverse order is a known
+  // arduino-esp32 footgun where the AP's security (the password) silently
+  // doesn't take, even though softAP() itself reports success and the
+  // network still shows as WPA2 in a scan. See README.md's "Access point"
+  // section.
   WiFi.mode(WIFI_AP);
-  WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
   const bool hasPassword = strlen(settings.apPassword) >= 8;
   const bool apOk = hasPassword ? WiFi.softAP(settings.apSsid, settings.apPassword, AP_WIFI_CHANNEL)
                                  : WiFi.softAP(settings.apSsid, nullptr, AP_WIFI_CHANNEL);
+  WiFi.softAPConfig(AP_IP, AP_IP, AP_NETMASK);
   Serial.printf("[SELFTEST] wifi AP %s ssid=%s ip=%s\n", apOk ? "up" : "FAILED", settings.apSsid,
                 WiFi.softAPIP().toString().c_str());
 

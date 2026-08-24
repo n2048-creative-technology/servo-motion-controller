@@ -1,9 +1,42 @@
 # scripts-tools
 
-PC-side tools for this project, all talking to a Master board over USB
-serial using the protocol in [../docs/serial-protocol.md](../docs/serial-protocol.md).
-`serial_link.py` is the shared connection code both GUIs below use — not a
-standalone tool.
+PC-side tools for this project. `master_gui.py` and `joystick_master_gui.py`
+talk to a Master board over USB serial using the protocol in
+[../docs/serial-protocol.md](../docs/serial-protocol.md) — `serial_link.py`
+is their shared connection code, not a standalone tool. `upload_all.py` is a
+build/deploy tool instead, driving PlatformIO directly rather than talking to
+any board's firmware.
+
+## `upload_all.py`
+
+Flashes the latest firmware **and** LittleFS web UI to every connected board
+in one go — the build-once-then-flash-in-parallel workflow used by hand
+throughout this project's development, scripted. For each connected serial
+port it probes the actual chip with `esptool` and matches it against
+`firmware/platformio.ini`'s configured environments (via each environment's
+installed board definition, not a hardcoded chip list — a new environment
+added to `platformio.ini` needs no change here); anything that doesn't match
+a configured environment — an unrelated serial device, or a board type this
+project doesn't build for — is skipped with a clear reason instead of a
+failed or garbled flash attempt.
+
+```bash
+python3 upload_all.py              # build + flash firmware and filesystem to every matched board
+python3 upload_all.py --dry-run    # show what would be flashed, touch nothing
+python3 upload_all.py --fw-only    # skip the filesystem image
+python3 upload_all.py --fs-only    # skip the firmware binary
+python3 upload_all.py --jobs 2     # limit how many boards flash at once (default 8)
+```
+
+Builds happen once per matched environment before any board is touched —
+running multiple `pio run` invocations concurrently against the *same*
+environment's build directory corrupts its SCons dependency cache (hit in
+practice during this project's development); only the actual per-board
+upload, which is safe to parallelize, fans out across boards. Verified
+end-to-end against all 5 real boards on hand (1 Master + 4 Nodes, a mix of
+XIAO ESP32C3 and ESP32S3): correctly identified each board's chip, matched
+it to the right environment, and flashed firmware + filesystem to all 5
+successfully.
 
 ## `master_gui.py`
 

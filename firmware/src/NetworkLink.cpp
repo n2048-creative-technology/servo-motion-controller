@@ -13,8 +13,15 @@ namespace {
 // Fine in practice: exactly one NetworkLink is ever constructed (in main.cpp).
 NetworkLink *g_instance = nullptr;
 
-void onRecvTrampoline(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
-  (void)info;
+// esp_now_recv_cb_t's signature changed across arduino-esp32 core versions
+// (older cores pass the sender's raw MAC address here; newer ones pass an
+// esp_now_recv_info_t*). This project pins framework-arduinoespressif32
+// 3.20017 (see platformio.ini's lock file), which still uses the older,
+// plain-MAC signature — matching it exactly here, rather than the newer
+// esp_now_recv_info_t one, is what actually compiles against what's
+// installed.
+void onRecvTrampoline(const uint8_t *mac, const uint8_t *data, int len) {
+  (void)mac;
   if (g_instance) g_instance->onRecv(data, len);
 }
 

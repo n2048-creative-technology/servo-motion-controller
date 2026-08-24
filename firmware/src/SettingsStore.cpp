@@ -42,11 +42,69 @@ void SettingsStore::load() {
     factoryDefaults();
     save();
   }
+
+  // Always runs last, whether the block above did a normal load or a
+  // version-mismatch factory reset: puts the persisted SSID/password/
+  // network mode/node id back regardless, since those live independently of
+  // SETTINGS_VERSION. See Config.h's NET_IDENTITY_NVS_KEY comment.
+  loadNetworkIdentity();
 }
 
 void SettingsStore::save() {
   Preferences prefs;
   prefs.begin(NVS_NAMESPACE, /*readOnly=*/false);
   prefs.putBytes(NVS_KEY, &settings_, sizeof(settings_));
+  prefs.end();
+  saveNetworkIdentity();
+}
+
+void SettingsStore::loadNetworkIdentity() {
+  struct NetworkIdentity {
+    uint32_t magic = 0;
+    char apSsid[33] = {0};
+    char apPassword[65] = {0};
+    OperatingMode networkMode = OperatingMode::STANDALONE;
+    uint8_t nodeId = NET_NODE_ID_MIN;
+  };
+
+  Preferences prefs;
+  prefs.begin(NVS_NAMESPACE, /*readOnly=*/true);
+  NetworkIdentity id;
+  size_t got = prefs.getBytes(NET_IDENTITY_NVS_KEY, &id, sizeof(id));
+  prefs.end();
+
+  if (got == sizeof(id) && id.magic == NET_IDENTITY_MAGIC) {
+    strncpy(settings_.apSsid, id.apSsid, sizeof(settings_.apSsid) - 1);
+    settings_.apSsid[sizeof(settings_.apSsid) - 1] = '\0';
+    strncpy(settings_.apPassword, id.apPassword, sizeof(settings_.apPassword) - 1);
+    settings_.apPassword[sizeof(settings_.apPassword) - 1] = '\0';
+    settings_.networkMode = id.networkMode;
+    settings_.nodeId = id.nodeId;
+  } else {
+    // No identity saved under this key yet (a board's first boot on
+    // firmware that has this fix, or a genuinely first-ever boot) — seed it
+    // from whatever settings_ already holds so it exists from here on.
+    saveNetworkIdentity();
+  }
+}
+
+void SettingsStore::saveNetworkIdentity() {
+  struct NetworkIdentity {
+    uint32_t magic = NET_IDENTITY_MAGIC;
+    char apSsid[33] = {0};
+    char apPassword[65] = {0};
+    OperatingMode networkMode = OperatingMode::STANDALONE;
+    uint8_t nodeId = NET_NODE_ID_MIN;
+  };
+
+  NetworkIdentity id;
+  strncpy(id.apSsid, settings_.apSsid, sizeof(id.apSsid) - 1);
+  strncpy(id.apPassword, settings_.apPassword, sizeof(id.apPassword) - 1);
+  id.networkMode = settings_.networkMode;
+  id.nodeId = settings_.nodeId;
+
+  Preferences prefs;
+  prefs.begin(NVS_NAMESPACE, /*readOnly=*/false);
+  prefs.putBytes(NET_IDENTITY_NVS_KEY, &id, sizeof(id));
   prefs.end();
 }

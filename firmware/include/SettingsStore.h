@@ -71,4 +71,9 @@ public:
 private:
   PersistedSettings settings_;
   void generateDefaultSsid(char *out, size_t outLen);
+  // Overlays settings_'s SSID/password/network mode/node id from their own
+  // NVS key, or seeds that key from settings_'s current values if it doesn't
+  // exist yet. See Config.h's NET_IDENTITY_NVS_KEY comment.
+  void loadNetworkIdentity();
+  void saveNetworkIdentity();
 };
