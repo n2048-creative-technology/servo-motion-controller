@@ -130,8 +130,8 @@
 
     // Same for the relay: sequence playback and other clients switch it too.
     //
-    // Deliberately NOT guarded on document.activeElement the way the jog
-    // slider above is. A checkbox keeps focus after you click it, so that
+    // Deliberately NOT guarded on the drag check the way the trackpad
+    // above is. A checkbox keeps focus after you click it, so that
     // guard would suppress every later update for the rest of the session —
     // the switch would sit wherever you last left it and never follow
     // sequence playback. What it does need is a brief echo window after a
@@ -864,7 +864,7 @@
     });
   }
 
-  // One settings fetch at boot: it carries the servo travel the jog fader and
+  // One settings fetch at boot: it carries the servo travel the trackpad and
   // pattern forms need, the relay's polarity/pin, and the Master-only bits.
   async function initFromSettings() {
     const settings = await apiGet("/api/settings").catch(() => null);

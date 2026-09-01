@@ -114,7 +114,7 @@ void setup() {
     networkMotionSink.begin(&networkLink);
     sink = &networkMotionSink;
     // A Master's own D7 stays idle: its light toggle drives the selected
-    // Node(s)' relays over ESP-NOW, exactly like its jog slider does.
+    // Node(s)' relays over ESP-NOW, exactly like its trackpad does.
     relaySink = &networkMotionSink;
     serialBridge.begin(&networkLink);
     networkLink.onSeqAck([](uint8_t nodeId, const char *name, SeqAckStatus status, uint16_t points) {

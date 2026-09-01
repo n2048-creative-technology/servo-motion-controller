@@ -33,7 +33,7 @@ NODE_POLL_INTERVAL_MS = 2000
 PAD_SIZE = 180           # px; the XY pad is square so both axes read alike
 PAD_ANGLE_MIN = 0.0      # the pad spans a servo's default 0-270 travel; the
 PAD_ANGLE_MAX = 270.0    # firmware clamps to each node's real calibration
-JOG_SEND_INTERVAL_S = 0.04  # ~25 Hz, matches the web UI's jog slider throttle
+JOG_SEND_INTERVAL_S = 0.04  # ~25 Hz, matches the web UI's trackpad throttle
 MAX_LOG_LINES = 500
 
 
@@ -70,7 +70,10 @@ class App:
         self.connect_btn.pack(side="left", padx=(8, 0))
 
         self.status_var = tk.StringVar(value="disconnected")
-        ttk.Label(conn, textvariable=self.status_var, foreground="#a33").pack(side="left", padx=(10, 0))
+        # Kept as an attribute so _set_connected_state can recolour it —
+        # a red "connected" reads like an error at a glance.
+        self.status_label = ttk.Label(conn, textvariable=self.status_var, foreground="#a33")
+        self.status_label.pack(side="left", padx=(10, 0))
 
         nodes_frame = ttk.LabelFrame(
             self.root, text="Known nodes (ctrl/shift-click to select several as the send target)", padding=8
@@ -205,7 +208,7 @@ class App:
     def _set_connected_state(self, connected):
         self.connect_btn.configure(text="Disconnect" if connected else "Connect")
         self.status_var.set("connected" if connected else "disconnected")
-        self.status_var_color = "#2a2" if connected else "#a33"
+        self.status_label.configure(foreground="#2a2" if connected else "#a33")
         self.port_combo.configure(state="disabled" if connected else "readonly")
 
     # ---------- sending ----------

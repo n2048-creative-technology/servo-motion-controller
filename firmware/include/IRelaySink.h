@@ -5,7 +5,7 @@
 // output; NetworkAngleSink implements it for a Master board, turning the same
 // toggle into ESP-NOW CMD packets aimed at the selected Node(s) instead of a
 // local GPIO write — so the relay follows exactly the same local-vs-remote
-// routing the jog slider already does.
+// routing the trackpad's angles already does.
 class IRelaySink {
 public:
   virtual ~IRelaySink() = default;

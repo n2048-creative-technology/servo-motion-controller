@@ -76,7 +76,7 @@ can hold several (locally recorded, or remotely uploaded by a Master; see
 serial-protocol.md's `remote_record_start`/`remote_record_stop`), not just
 one fixed recording like early versions of this firmware.
 
-On a **Master** board the Light toggle behaves like the jog slider: it
+On a **Master** board the Light toggle behaves like the trackpad: it
 switches the relay on whichever Node(s) `/api/network/targets` selects, not
 the Master's own D7 pin. Relay state is tracked per target, so a Node's light
 is only changed by a command actually addressed to it.

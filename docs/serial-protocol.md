@@ -74,8 +74,8 @@ saves whatever it captured as `/seq/<name>.bin` — overwriting any existing
 file of that name — and reports back asynchronously (see `upload_result`
 below) — this can take a moment, since it travels Node → Master over ESP-NOW
 after the save completes. A Node's recording buffer caps at `MAX_SEQ_POINTS ×
-RECORD_INTERVAL_MS` (10 minutes by default); don't stream longer than that or
-the excess is silently dropped. `scripts-tools/joystick_master_gui.py`'s
+RECORD_INTERVAL_MS` (6min40s by default — 8000 points at 50ms); don't stream
+longer than that or the excess is silently dropped. `scripts-tools/joystick_master_gui.py`'s
 "Upload to Node…" button implements this whole flow, including only ever
 sending one Node's own column from a multi-node recording (see its README).
 
@@ -171,15 +171,15 @@ counter reset to 0. Non-finite angles (a corrupted payload) are dropped the
 same way, as cheap insurance against ever computing a garbage pulse width.
 
 This is why **Master and every Node must run matching firmware** — a
+`NET_PACKET_VERSION` mismatch (bumped whenever the packet layout changes,
+as it did for this ordering fix) makes them silently ignore each other
+rather than misinterpret each other's bytes.
+
 A Node can hold **6min40s** of recording (8000 points at 50ms). That came
 down from 10 minutes when each point gained its Y axis: the point grew 8 → 12
 bytes, and the count was cut to keep the fixed buffer at the same 96KB rather
 than spend another 48KB of the C3's RAM. See `MAX_SEQ_POINTS` in
 `firmware/include/Config.h`.
-
-`NET_PACKET_VERSION` mismatch (bumped whenever the packet layout changes,
-as it did for this ordering fix) makes them silently ignore each other
-rather than misinterpret each other's bytes.
 
 ### A Node can reset mid-upload on fast/large movements — this is a power issue, not a protocol one
 

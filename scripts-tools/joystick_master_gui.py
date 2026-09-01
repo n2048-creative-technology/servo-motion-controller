@@ -44,7 +44,7 @@ from serial.tools import list_ports
 
 from serial_link import SerialLink, BAUD_RATE
 
-TICK_INTERVAL_MS = 40  # ~25 Hz, matches the web UI's jog slider throttle
+TICK_INTERVAL_MS = 40  # ~25 Hz, matches the web UI's trackpad throttle
 NODE_POLL_INTERVAL_MS = 2000
 LEARN_DURATION_MS = 4000
 LEARN_POLL_INTERVAL_MS = 30
@@ -984,7 +984,7 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("Servo Rig — Joystick Bridge")
-        root.geometry("720x760")
+        root.geometry("760x900")  # tall enough for the mapping list, recording controls and log
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         pygame.init()
@@ -1038,7 +1038,8 @@ class App:
         self.connect_btn = ttk.Button(conn, text="Connect", command=self._toggle_connect)
         self.connect_btn.grid(row=0, column=3, sticky="w", padx=(8, 0))
         self.status_var = tk.StringVar(value="disconnected")
-        ttk.Label(conn, textvariable=self.status_var, foreground="#a33").grid(row=0, column=4, sticky="w", padx=(10, 0))
+        self.status_label = ttk.Label(conn, textvariable=self.status_var, foreground="#a33")
+        self.status_label.grid(row=0, column=4, sticky="w", padx=(10, 0))
 
         joy = ttk.LabelFrame(self.root, text="Controllers (all connected ones are usable at once)", padding=8)
         joy.pack(fill="x", padx=8, pady=(0, 8))
@@ -1189,6 +1190,7 @@ class App:
     def _set_connected_state(self, connected):
         self.connect_btn.configure(text="Disconnect" if connected else "Connect")
         self.status_var.set("connected" if connected else "disconnected")
+        self.status_label.configure(foreground="#2a2" if connected else "#a33")
         self.port_combo.configure(state="disabled" if connected else "readonly")
 
     # ---------- controller handling ----------

@@ -10,7 +10,7 @@ for:
   own calibrated travel (270° out of the box, 180° if that's how you set that
   servo up).
 - A relay output on pin **D7** for a light, switched by a toggle beside the
-  jog slider.
+  trackpad.
 - Parametric motion patterns — sine, square, triangle, sawtooth, trapezoid —
   each with adjustable period/amplitude/offset (and duty or rise/hold/fall
   ratios where relevant), looped continuously. **Each axis runs its own
@@ -41,20 +41,23 @@ environment (`seeed_xiao_esp32c3` or `seeed_xiao_esp32s3`) when building/flashin
 | Relay / light | **pin D7 (GPIO20)** → relay module IN | **pin D7 (GPIO44)** → relay module IN |
 | Flash / RAM | 4MB / ~400KB SRAM | 8MB / ~512KB SRAM |
 
-Both boards use the **same silkscreen-labeled pin D10** for the servo signal
-— no wiring changes needed when switching boards — but note it's a
-*different underlying GPIO number* on each (`SERVO_PIN` in
-`firmware/include/Config.h` is selected per-board via `ARDUINO_XIAO_ESP32S3`,
+Both boards use the **same silkscreen-labeled pins** for all three outputs
+— D10 (pan), D3 (tilt), D7 (relay) — so no wiring changes are needed when
+switching boards, but note each is a *different underlying GPIO number* on
+each chip (`SERVO_X_PIN` / `SERVO_Y_PIN` / `RELAY_PIN` in
+`firmware/include/Config.h` are selected per-board via `ARDUINO_XIAO_ESP32S3`,
 already handled for you).
 
 | | |
 |---|---|
-| Servo power | **Do not power the servo from the XIAO's 3V3/5V pin if it draws more than ~500mA.** Use a separate 5–6V supply for the servo, with its ground tied to the XIAO's GND. |
-| Servo pulse range | Default 500–2500 µs, calibratable in Settings (min/max pulse, min/max angle, center) |
+| Servo power | **Do not power the servos from the XIAO's 3V3/5V pin.** Two servos that can move at once roughly double the peak draw; use a separate 5–6V supply sized for both, with its ground tied to the XIAO's GND. The relay module's coil side runs off that same supply, not the XIAO's 3V3. |
+| Servo pulse range | Default 500–2500 µs, calibratable **per axis** in Settings (min/max pulse, min/max angle, center, invert) |
 
-The default calibration assumes a wide-range (~270°) servo, matching pulse
+The default calibration assumes wide-range (~270°) servos, matching pulse
 widths used in other projects in this workspace. Adjust min/max angle and
-pulse width in the web UI's Settings tab to match your actual servo.
+pulse width in the web UI's Settings tab to match each of your actual servos —
+pan and tilt are calibrated separately, since a tilt servo usually has a
+different mechanical range.
 
 ## Access point
 
@@ -86,6 +89,12 @@ pulse width in the web UI's Settings tab to match your actual servo.
 
 Requires [PlatformIO](https://platformio.org/) (`pio` CLI).
 
+**Pin the platform first**: `platform = espressif32` in `platformio.ini` is
+unpinned, and the current release of it no longer compiles `NetworkLink.cpp`
+(ESP-NOW callback signature change in arduino-esp32 3.x — see Known
+limitations at the end). Use `platform = espressif32@6.10.0`, the version this
+was developed and flashed with.
+
 ```bash
 cd firmware
 ENV=seeed_xiao_esp32c3   # or seeed_xiao_esp32s3
@@ -114,8 +123,9 @@ first thing to try; if your setup doesn't need it, it's harmless to leave in.
 Verified end-to-end on real hardware, both boards: firmware and filesystem
 flashed successfully to a connected XIAO ESP32C3 and a connected XIAO
 ESP32S3, and each one's serial self-test log confirmed a clean boot —
-settings loaded, servo attached on the correct pin (GPIO10 on the C3, GPIO9
-on the S3 — both are silkscreen pin D10), LittleFS mounted, WiFi AP up
+settings loaded, both servos attached on the correct pins (GPIO10/GPIO5 on
+the C3, GPIO9/GPIO4 on the S3 — silkscreen D10 and D3), the relay driven to
+its off level on D7, LittleFS mounted, WiFi AP up
 (`ServoRig-xxxxxx` @ `192.168.4.1`), web server started (~195KB free heap on
 the C3, ~259KB on the S3, matching its larger SRAM). **Not verified**: the
 web UI and API themselves, since this environment has no WiFi adapter to
@@ -133,7 +143,7 @@ Three tabs, reachable from the bottom nav:
   parameter fields and Start/Stop. The pad's extents and the pattern forms'
   angle fields both follow the per-axis calibration set in Settings.
 
-  <img src="images/webui-manual.png" alt="Manual tab: jog slider and pattern picker" width="300">
+  <img src="images/webui-manual.png" alt="Manual tab: XY trackpad with Light toggle, and a pattern shape per axis" width="300">
 
 - **Record** — start/stop recording (captures both servo axes *and* the
   relay's state at a fixed 20 Hz while you aim the head), live trace with one
@@ -147,7 +157,11 @@ Three tabs, reachable from the bottom nav:
   you tap its row in the list, downsampled by the board, with a thin white
   playhead following playback through it.
 
-  <img src="images/webui-record.png" alt="Record tab: recording controls and saved sequence" width="300">
+  <img src="images/webui-record.png" alt="Record tab: live trace of both axes plus the light lane, and the saved-sequence list" width="290"> <img src="images/webui-record-saved-plot.png" alt="Record tab: a saved recording plotted with a playhead sweeping through it" width="290">
+
+  *Left: recording in progress — pan and tilt as two lines, the light as a
+  lane along the bottom. Right: a saved recording tapped in the list, plotted
+  with the white playhead tracking playback through it.*
 
 - **Settings** — AP SSID/password, per-axis servo calibration (including
   **Invert direction**, for a servo mounted mirrored/reversed relative to its
@@ -156,23 +170,26 @@ Three tabs, reachable from the bottom nav:
   enable/target (pattern or sequence) with its own parameter fields, and a
   factory-reset button.
 
-  <img src="images/webui-settings-calibration.png" alt="Settings tab: AP, servo calibration with invert checkbox" width="300">
+  <img src="images/webui-settings-calibration.png" alt="Settings tab: per-axis servo calibration with invert checkboxes, and relay polarity" width="300">
 
 ## REST / WebSocket API
 
 See [docs/api.md](docs/api.md) for the full route table and payload shapes.
-WebSocket `/ws` pushes `{"type":"status", mode, angle, ...}` at ~10 Hz and
-accepts `{"cmd":"jog","angle":123.4}` for low-latency manual moves.
+WebSocket `/ws` pushes `{"type":"status", mode, x, y, relay_on, ...}` at
+~10 Hz and accepts `{"cmd":"jog","x":123.4,"y":90.0}` and
+`{"cmd":"relay","on":true}` for low-latency manual control. (`angle` is still
+sent and accepted as a deprecated alias for `x`, so anything written against
+the single-servo API keeps working.)
 
 ## Multi-board Master/Node mode (v2)
 
 Every board still runs the same firmware and, by default, is exactly the
-self-contained single-servo rig described above (**Standalone** mode). On top
-of that, a board can be switched (Settings → Network) into:
+self-contained pan/tilt-plus-light rig described above (**Standalone** mode).
+On top of that, a board can be switched (Settings → Network) into:
 
 Settings → Network, all three modes:
 
-<img src="images/webui-network-standalone.png" alt="Network settings: Standalone mode" width="260"> <img src="images/webui-network-node.png" alt="Network settings: Node mode with Node ID field" width="260"> <img src="images/webui-network-master.png" alt="Network settings: Master mode with known-nodes table" width="260">
+<img src="images/webui-network-standalone.png" alt="Network settings: Standalone mode" width="260"> <img src="images/webui-network-node.png" alt="Network settings: Node mode with Node ID field" width="260"> <img src="images/webui-network-master.png" alt="Network settings: Master mode with the known-nodes table showing each Node's pan, tilt and light" width="260">
 
 - **Node** — everything Standalone does, plus a **Node ID** (1–250) and an
   ESP-NOW listener: it accepts wireless positioning commands from a Master in
@@ -183,32 +200,35 @@ Settings → Network, all three modes:
 - **Master** — a bridge, not a servo controller: connect it to a PC over
   USB-C and it relays newline-delimited JSON commands from that serial port
   to every Node in ESP-NOW range. See [docs/serial-protocol.md](docs/serial-protocol.md)
-  for the wire format (`{"node":3,"angle":120.5}`, `{"cmd":"list"}`, etc.)
-  and a `pyserial` example. A Master needs no servo attached.
+  for the wire format (`{"node":3,"x":120.5,"y":90.0}`, `{"cmd":"list"}`,
+  etc.) and a `pyserial` example. A Master needs no servos attached.
 
   A Master's **own web UI works too**: its Manual tab gets a "Target" card
   (Settings → Network → Master) listing known Nodes as checkboxes — select
-  one, several, or check "All nodes" — and the existing Jog slider / Pattern
-  controls drive that selection over ESP-NOW instead of a local servo. Handy
+  one, several, or check "All nodes" — and the existing trackpad / Light
+  toggle / Pattern controls drive that selection over ESP-NOW instead of a
+  local servo. Handy
   for driving the rig by hand from a phone without any PC involved at all;
   the serial bridge above is for scripted/external control.
 
-  <img src="images/webui-manual-master-target.png" alt="Master's Manual tab: Target card with node checkboxes" width="300">
+  <img src="images/webui-manual-master-target.png" alt="Master's Manual tab: Target card listing known Nodes with their pan/tilt positions, above the trackpad" width="300">
 
   For PC-driven control there's also [scripts-tools/master_gui.py](scripts-tools/master_gui.py),
   a small Tkinter app that connects to a Master's serial port, shows its known
-  Nodes, and lets you jog/send positions to a selection of them (or broadcast
-  to all) without writing any code:
+  Nodes (pan, tilt, light state and age), and lets you aim a selection of them
+  with an XY pad — light included — or broadcast to all, without writing any
+  code:
 
-  <img src="images/pytool-master-gui.png" alt="master_gui.py: serial connection, known-nodes table, send controls" width="420">
+  <img src="images/pytool-master-gui.png" alt="master_gui.py: known-nodes table with X/Y/Light columns, XY pad and light checkbox" width="420">
 
   and [scripts-tools/joystick_master_gui.py](scripts-tools/joystick_master_gui.py),
-  which links a physical joystick/gamepad's axes to Nodes (with a "learn the
-  axis" calibration step), streams live movement to them, and can record a
-  performance to CSV (Node ID + angle per timestamp) for standalone replay
-  without the controller — see [scripts-tools/README.md](scripts-tools/README.md).
+  which links physical joysticks/gamepads to Nodes (with a "learn the axis"
+  step that takes a whole stick as one pan/tilt pair, and buttons as a Node's
+  light), streams live movement to them, and can record a performance to CSV
+  (Node ID + pan + tilt + light per timestamp) for standalone replay without
+  the controller — see [scripts-tools/README.md](scripts-tools/README.md).
 
-  <img src="images/pytool-joystick-gui.png" alt="joystick_master_gui.py: controller detected, axis readout, mapping table" width="420">
+  <img src="images/pytool-joystick-gui.png" alt="joystick_master_gui.py: two controllers detected, per-axis and per-button node mappings, streaming and recording" width="420">
 
   **A performance doesn't have to stay tied to the PC.** `joystick_master_gui.py`'s
   **Upload to Node…** button takes a loaded CSV or a just-made recording,
@@ -288,11 +308,23 @@ rather than misbehave.
 - Captive-portal auto-popup varies by phone OS; the DNS catch-all + redirect
   is best-effort, `192.168.4.1` is the documented fallback.
 - No STA/recovery network — see the access point section above.
-- Flash is fairly full (70.5% of the app partition as of v2) since
-  `ESPAsyncWebServer` + `ArduinoJson` + `ESP32Servo` are meaningfully sized
-  libraries on a 1.25MB app partition. If you add more features and hit the
-  ceiling, look at a non-OTA partition table (`board_build.partitions`) to
-  reclaim the unused second OTA app slot.
+- Flash is fairly full (72.3% of the app partition — 947,794 of 1,310,720
+  bytes on the C3 as of v2.2.0) since `ESPAsyncWebServer` + `ArduinoJson` +
+  `ESP32Servo` are meaningfully sized libraries on a 1.25MB app partition. If
+  you add more features and hit the ceiling, look at a non-OTA partition
+  table (`board_build.partitions`) to reclaim the unused second OTA app slot.
+- **`platform = espressif32` is unpinned in `platformio.ini`, and the current
+  release of it no longer builds this firmware.** arduino-esp32 3.x /
+  ESP-IDF 5.x changed the ESP-NOW receive callback signature, so
+  `NetworkLink.cpp`'s `esp_now_register_recv_cb(onRecvTrampoline)` fails to
+  compile: `invalid conversion from 'void (*)(const uint8_t*, const uint8_t*,
+  int)' to 'esp_now_recv_cb_t'` (the callback now takes a
+  `const esp_now_recv_info*` first argument, carrying the sender MAC in
+  `->src_addr`). This project was developed against **espressif32 6.10.0**,
+  which is still installed here and builds cleanly. Until the trampoline is
+  ported, pin it — `platform = espressif32@6.10.0` in `[env]` — or update the
+  callback signature. Everything else in this repo (the web UI filesystem
+  image included) builds on either.
 - Master/Node mode is build-verified (`pio run` / `-t buildfs` both succeed)
   and boards on hand have been flashed and boot-confirmed over serial
   (settings v6, LittleFS OK, AP up), but the actual ESP-NOW link between a
@@ -322,16 +354,24 @@ rather than misbehave.
   reason as the rest of Master/Node mode. Worth a real end-to-end check:
   upload something, confirm it shows up in that Node's Settings → Autostart
   sequence picker, and that it survives a reboot.
-- The web UI screenshots above were captured by serving `firmware/data/`
-  through a local mock API (canned JSON standing in for the ESP32's
-  responses) and driving a real headless Chromium over it — real rendering
-  and JS logic, but not the actual ESP32 backend or WiFi AP.
-- The `scripts-tools/` PC GUIs were actually launched on a real X display for
-  these screenshots (not just syntax-checked) — which caught a real bug in
-  `master_gui.py` (a callback referenced `live_jog_var` before it was created,
-  crashing on the first slider draw; now fixed) and confirmed
-  `joystick_master_gui.py` correctly detects a real controller and gates the
-  streaming checkbox until a mapping exists. Still not exercised: an actual
-  Master serial connection or live streaming/recording session with hardware
-  end-to-end.
-# servo-motion-controller
+- **How the screenshots above were made** (all of them show the current
+  two-servo + relay build; they were re-captured for it):
+  - Web UI: `firmware/data/` served by a local mock API — canned JSON in the
+    exact shape `WebApi.cpp` returns, plus a `/ws` status stream at the
+    firmware's own rate — driven in real headless Chromium. Real rendering,
+    real app.js logic (the traces are genuinely drawn by the UI from status
+    frames), but not the actual ESP32 backend or WiFi AP.
+  - PC GUIs: both launched for real under a headless X server, connected to a
+    stand-in Master on a pseudo-terminal that speaks
+    [docs/serial-protocol.md](docs/serial-protocol.md) — so the node tables,
+    the traffic in the serial logs and the recording counter are all the
+    tools' own code doing real work. `joystick_master_gui.py`'s controllers
+    are stubbed at the `pygame.joystick` boundary (no gamepad was plugged in
+    here); everything below that — mapping load, streaming, recording — ran
+    for real. Still not exercised end-to-end: a real Master board over USB
+    with real Nodes on the other side.
+  - Two things this pass caught and fixed in the tools themselves: the
+    "connected" status label stayed red after connecting in both GUIs (the
+    colour was computed but never applied), and `joystick_master_gui.py`'s
+    default window was too short for its current control set, cutting off the
+    serial log.

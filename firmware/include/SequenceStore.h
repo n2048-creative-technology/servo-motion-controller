@@ -51,7 +51,7 @@ struct SequenceInfo {
 };
 
 // Fixed-capacity, no-heap-growth store for a servo motion sequence — either
-// hand-recorded locally (jog slider) or remotely captured via a Master's
+// hand-recorded locally (trackpad) or remotely captured via a Master's
 // SEQ_START/SEQ_STOP (see NetworkLink.h). Recording samples are captured at
 // a fixed cadence (RECORD_INTERVAL_MS) by PlaybackEngine, independent of how
 // fast jog updates or network commands actually arrive.

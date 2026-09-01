@@ -225,7 +225,7 @@ Workflow:
    combined summary once every Node in the batch has finished. Each Node
    saves its sequence and can then loop it on every
    boot via its own Settings → Autostart, completely standalone — no PC,
-   Master, or controller needed afterward. Long recordings (over 10
+   Master, or controller needed afterward. Long recordings (over
    6min40s, a Node's own capacity now that each recorded point carries both
    axes) are truncated with a warning per Node.
    The start request is sent redundantly (a lost one is otherwise invisible

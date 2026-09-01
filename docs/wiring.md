@@ -19,11 +19,11 @@
 ```
 
 - **Signals**: XIAO pin **D10** → the pan (X) servo, **D3** → the tilt (Y)
-  servo, on either board. This is
-  the same silkscreen-labeled pin on both, but a different GPIO underneath —
-  `SERVO_PIN` in `firmware/include/Config.h` selects the right one per board
-  automatically (compiled in per-environment, nothing to configure). It's
-  also mirrored in the default servo calibration shown in the Settings tab.
+  servo, on either board. These are the same silkscreen-labeled pins on both,
+  but different GPIOs underneath — `SERVO_X_PIN` and `SERVO_Y_PIN` in
+  `firmware/include/Config.h` select the right ones per board automatically
+  (compiled in per-environment, nothing to configure). Each axis's pin is
+  also shown next to its own calibration block in the Settings tab.
 - **Power**: run the servos from a separate 5–6V supply sized for their stall
   current, not from the XIAO's own 3V3/5V rail. **Two servos roughly double
   the peak draw**, and both can move at once — a supply that just coped with
@@ -38,8 +38,8 @@
   switches on when IN goes *low* (most opto-isolated boards do), tick
   **Active low** in Settings → Relay / Light; nothing needs reflashing.
 - **XIAO power**: USB-C only, as specified. Neither the C3 nor the S3 draws
-  meaningfully within USB power budgets; it's the servo that typically needs
-  its own supply.
+  meaningfully within USB power budgets; it's the servos and the relay coil
+  that need their own supply.
 
 ## Pin choice notes
 
@@ -64,13 +64,14 @@ shared timer supports, and each still gets its own channel (the C3 has 6).
 The one thing to know about D7: because it *is* UART0 RX, wiring a relay there
 rules out ever driving these boards over the hardware UART instead of USB. If
 you need that, move `RELAY_PIN` in `firmware/include/Config.h` to a free pin
-(D1–D5 are all unused by this firmware) and reflash. The relay is driven low
+(D1, D2, D4 and D5 are unused by this firmware — D3 is the tilt servo) and
+reflash. The relay is driven low
 before the pin is switched to an output at boot, so an active-low module
 doesn't get a momentary "on" pulse during startup.
 
-If you need to move the servo to a different pin, change `SERVO_PIN` in
-`firmware/include/Config.h` (it's already conditional per board via
-`ARDUINO_XIAO_ESP32S3` — keep that in mind if you add a pin override) and
-reflash. Double-check your target chip's specific strapping-pin list in
+If you need to move a servo to a different pin, change `SERVO_X_PIN` or
+`SERVO_Y_PIN` in `firmware/include/Config.h` (both are already conditional per
+board via `ARDUINO_XIAO_ESP32S3` — keep that in mind if you add a pin
+override) and reflash. Double-check your target chip's specific strapping-pin list in
 Espressif's technical reference manual before picking a low-numbered GPIO —
 it varies by chip, not just by board.

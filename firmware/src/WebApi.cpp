@@ -322,7 +322,7 @@ void WebApi::setupRoutes() {
         request->send(200, "application/json", "{\"ok\":true}");
       }));
 
-  // The light next to the jog fader. Deliberately doesn't change playback
+  // The light next to the trackpad. Deliberately doesn't change playback
   // mode: switching it mid-pattern shouldn't stop the pattern, and mid-
   // recording it's captured by the ordinary capture tick alongside the angle.
   server_.addHandler(new AsyncCallbackJsonWebHandler(
