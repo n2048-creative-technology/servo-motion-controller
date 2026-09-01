@@ -71,6 +71,16 @@ pulse width in the web UI's Settings tab to match your actual servo.
   without a connection. In practice: flash a fresh build, or add a physical
   factory-reset trigger (e.g. a boot-time GPIO check) if you expect to need
   this in the field — not implemented here to keep scope minimal.
+- Two arduino-esp32 gotchas that used to cause "correct password rejected"
+  and "settings reset to factory defaults on every reflash" are worked
+  around in `main.cpp`'s `setup()`: `WiFi.persistent(false)` stops a stale
+  flash-cached AP config from fighting the one set at boot, and
+  `WiFi.softAP()` is always called before `WiFi.softAPConfig()` (the reverse
+  order silently drops the password even though `softAP()` reports success).
+  Separately, AP SSID/password and Master/Node role/Node ID are stored under
+  their own NVS key, independent of the versioned settings blob — so bumping
+  `SETTINGS_VERSION` for an unrelated field (a new calibration option, a new
+  pattern parameter) no longer wipes them back to factory defaults.
 
 ## Build & flash
 
@@ -91,18 +101,15 @@ Both `firmware.bin` and the LittleFS image (`index.html`/`app.js`/`style.css`
 in `firmware/data/`) must be flashed — `uploadfs` pushes the web UI, `upload`
 pushes the firmware. Re-run `uploadfs` any time you edit files in `data/`.
 
-**Native USB-CDC quirk on the XIAO ESP32C3**: on this board, `esptool`'s
-default post-connect baud-rate change (and the RAM-stub handoff) failed
-consistently over the native USB-CDC/JTAG port (`No serial data received`
-after "Stub running..."). Fixed by pinning `upload_speed = 115200` and
-`upload_flags = --no-stub` for that environment in `platformio.ini` (already
+**Native USB-CDC quirk on both XIAO boards**: `esptool`'s default
+post-connect baud-rate change (and the RAM-stub handoff) failed consistently
+over the native USB-CDC/JTAG port (`No serial data received` after "Stub
+running..."). Fixed by pinning `upload_speed = 115200` and
+`upload_flags = --no-stub` for both environments in `platformio.ini` (already
 set) — `--no-stub` talks to the ROM bootloader directly instead of handing
 off to a RAM stub, which is slower per-byte but reliable over this port. If
 you flash from a different machine/OS and hit the same error, that's the
-first thing to try; if your setup doesn't need it, it's harmless to leave
-in. **The XIAO ESP32S3 hasn't shown this issue** — it uploads fine with
-PlatformIO's defaults (460800 baud, stub), so no equivalent override is set
-for that environment; add one the same way if you ever hit it there.
+first thing to try; if your setup doesn't need it, it's harmless to leave in.
 
 Verified end-to-end on real hardware, both boards: firmware and filesystem
 flashed successfully to a connected XIAO ESP32C3 and a connected XIAO
@@ -286,18 +293,17 @@ rather than misbehave.
   libraries on a 1.25MB app partition. If you add more features and hit the
   ceiling, look at a non-OTA partition table (`board_build.partitions`) to
   reclaim the unused second OTA app slot.
-- Master/Node mode (v2) is build-verified (`pio run` / `-t buildfs` both
-  succeed) and all 4 boards on hand have been flashed and boot-confirmed over
-  serial (settings v3, LittleFS OK, AP up), but the actual ESP-NOW link
-  between a Master and a Node (a real serial or web-UI command moving a
-  *remote* servo) hasn't been hands-on verified end-to-end yet — this
-  environment has no WiFi adapter to join a board's AP and drive its web UI
-  over the air. Set one board to Master / another to Node with a chosen Node
-  ID and confirm it responds before relying on this in the field. Note also
-  that bumping `SETTINGS_VERSION` (for the new invert field) resets any
-  previously-configured Master/Node role back to Standalone on reflash — a
-  documented, intentional fallback, not a bug, but it means re-picking
-  Mode/Node ID after this update.
+- Master/Node mode is build-verified (`pio run` / `-t buildfs` both succeed)
+  and boards on hand have been flashed and boot-confirmed over serial
+  (settings v6, LittleFS OK, AP up), but the actual ESP-NOW link between a
+  Master and a Node (a real serial or web-UI command moving a *remote*
+  servo) hasn't been hands-on verified end-to-end from this environment —
+  it has no WiFi adapter to join a board's AP and drive its web UI over the
+  air. Set one board to Master / another to Node with a chosen Node ID and
+  confirm it responds before relying on this in the field. AP SSID/password
+  and Master/Node role/Node ID no longer reset on a `SETTINGS_VERSION` bump
+  (they live under their own NVS key — see the Access point section above),
+  so this no longer needs re-picking after an unrelated firmware update.
 - The command-resend/reapply/ordering robustness mechanisms (see above) are
   build-verified and flashed to all 4 boards on hand, but reproducing the
   actual failure mode (a phone joined to a Node's AP while a gamepad drives
