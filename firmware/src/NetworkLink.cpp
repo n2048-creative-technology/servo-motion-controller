@@ -272,12 +272,14 @@ bool NetworkLink::transmitOrdered(uint8_t type, uint8_t targetNode, const char *
 bool NetworkLink::sendSeqPlay(uint8_t targetNode, const char *name) {
   if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
   forgetLastCommands(targetNode);
+  if (handoverCb_) handoverCb_(targetNode);
   return transmitOrdered(NET_PACKET_TYPE_SEQ_PLAY, targetNode, name);
 }
 
 bool NetworkLink::sendSeqHalt(uint8_t targetNode) {
   if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
   forgetLastCommands(targetNode);
+  if (handoverCb_) handoverCb_(targetNode);
   return transmitOrdered(NET_PACKET_TYPE_SEQ_HALT, targetNode, nullptr);
 }
 

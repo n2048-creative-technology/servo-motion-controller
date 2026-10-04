@@ -31,7 +31,7 @@
   // silently be older than the other — which looks exactly like "the feature
   // doesn't work" rather than "half of it isn't on the board". Comparing them
   // at runtime turns that into a visible banner instead of a hunt.
-  const UI_VERSION = "2.3.0";
+  const UI_VERSION = "2.4.0";
 
   let patternCatalog = []; // [{type,label,params:[...]}]
   let ws = null;
@@ -91,6 +91,7 @@
       try {
         const msg = JSON.parse(evt.data);
         if (msg.type === "status") applyStatus(msg);
+        else if (msg.type === "play_result") onPlayResult(msg);
       } catch (e) { /* ignore malformed frame */ }
     };
   }
@@ -597,6 +598,7 @@
 
   async function refreshSequenceList() {
     sequenceCatalog = await apiGet("/api/sequences").catch(() => []);
+    refreshRemotePlayNames();
 
     const body = $("seqBody");
     if (body) {
@@ -864,6 +866,118 @@
     });
   }
 
+  // ---------- play saved sequence on Nodes (Manual tab, Master only) ----------
+  // Same delivery story as the PC tools' remote_play: ESP-NOW broadcast has no
+  // link-level ack, so a request is repeated until the Node's play_result
+  // comes back (or we give up). Both requests are idempotent on the Node — a
+  // repeated play of the sequence already looping doesn't restart it.
+  const REMOTE_RETRY_MS = 400;
+  const REMOTE_ATTEMPTS = 4;
+  let remoteRetries = new Map(); // node id -> {timer, name, attempts}
+  let remoteAllTimer = null;
+  let remoteStopTimers = [];
+
+  // Node 0 = every Node. A specific list gets one request per Node, so each
+  // one's own ack can stop its own retries.
+  function remoteTargetNodes() {
+    if (targetAllMode) return [0];
+    return [...selectedTargets].sort((a, b) => a - b);
+  }
+
+  function logRemote(text, cls) {
+    const log = $("remotePlayLog");
+    const line = document.createElement("div");
+    if (cls) line.className = cls;
+    line.textContent = `${new Date().toLocaleTimeString()}  ${text}`;
+    log.prepend(line);
+    while (log.childElementCount > 8) log.lastElementChild.remove();
+  }
+
+  function cancelRemoteRetries() {
+    remoteRetries.forEach((r) => clearTimeout(r.timer));
+    remoteRetries.clear();
+    if (remoteAllTimer) clearTimeout(remoteAllTimer);
+    remoteAllTimer = null;
+    // Likewise a stop still being repeated would halt a play pressed just after it.
+    remoteStopTimers.forEach(clearTimeout);
+    remoteStopTimers = [];
+  }
+
+  function sendRemotePlay(node, name, attempt) {
+    apiPost("/api/network/play", { node, name });
+    if (node === 0) {
+      // "All" can't tell when every Node has answered, so it just repeats a
+      // fixed number of times; acks are still logged as they arrive.
+      if (attempt < REMOTE_ATTEMPTS) {
+        remoteAllTimer = setTimeout(() => sendRemotePlay(0, name, attempt + 1), REMOTE_RETRY_MS);
+      }
+      return;
+    }
+    // After the last attempt, give its reply one more interval to arrive.
+    const next =
+      attempt < REMOTE_ATTEMPTS
+        ? () => sendRemotePlay(node, name, attempt + 1)
+        : () => {
+            remoteRetries.delete(node);
+            logRemote(`Node ${node}: no reply to play '${name}' (offline, or firmware older than 2.3.0?)`, "fail");
+          };
+    remoteRetries.set(node, { name, timer: setTimeout(next, REMOTE_RETRY_MS) });
+  }
+
+  function onPlayResult(msg) {
+    const pending = remoteRetries.get(msg.node);
+    if (pending) {
+      clearTimeout(pending.timer);
+      remoteRetries.delete(msg.node);
+    }
+    if (msg.ok) logRemote(`Node ${msg.node}: playing '${msg.name}'`, "ok");
+    else logRemote(`Node ${msg.node}: can't play '${msg.name}' — ${msg.reason || "failed"}`, "fail");
+  }
+
+  function initRemotePlayControls() {
+    $("remotePlayBtn").addEventListener("click", () => {
+      const name = $("remotePlayName").value.trim();
+      if (!name) {
+        logRemote("enter the name of a sequence saved on the Node(s)", "fail");
+        return;
+      }
+      const nodes = remoteTargetNodes();
+      if (!nodes.length) {
+        logRemote("no nodes selected in Target", "fail");
+        return;
+      }
+      cancelRemoteRetries();
+      logRemote(`play '${name}' on ${nodes[0] === 0 ? "all nodes" : nodes.map((n) => `Node ${n}`).join(", ")}…`);
+      nodes.forEach((n) => sendRemotePlay(n, name, 1));
+    });
+
+    $("remoteStopBtn").addEventListener("click", () => {
+      const nodes = remoteTargetNodes();
+      if (!nodes.length) {
+        logRemote("no nodes selected in Target", "fail");
+        return;
+      }
+      // A stop must also cancel any play still being retried, or a late
+      // resend would start the Node again right after it stopped.
+      cancelRemoteRetries();
+      // SEQ_HALT has no ack, so it's simply sent a few times.
+      for (let i = 0; i < REMOTE_ATTEMPTS; i++) {
+        remoteStopTimers.push(
+          setTimeout(() => nodes.forEach((node) => apiPost("/api/network/stop", { node })), i * REMOTE_RETRY_MS)
+        );
+      }
+      logRemote(`stop on ${nodes[0] === 0 ? "all nodes" : nodes.map((n) => `Node ${n}`).join(", ")}`);
+    });
+  }
+
+  // Suggests names saved on the Master itself: uploads to Nodes usually come
+  // from the same recordings. Any name can still be typed in.
+  function refreshRemotePlayNames() {
+    const list = $("remotePlayNames");
+    if (!list) return;
+    list.innerHTML = sequenceCatalog.map((s) => `<option value="${s.name}"></option>`).join("");
+  }
+
   // One settings fetch at boot: it carries the servo travel the trackpad and
   // pattern forms need, the relay's polarity/pin, and the Master-only bits.
   async function initFromSettings() {
@@ -880,6 +994,7 @@
     if (!isMaster) return;
 
     $("targetCard").style.display = "";
+    $("remotePlayCard").style.display = "";
     const targets = await apiGet("/api/network/targets").catch(() => ({ broadcast_all: true, node_ids: [] }));
     targetAllMode = targets.broadcast_all !== false;
     selectedTargets = new Set(targets.node_ids || []);
@@ -962,6 +1077,7 @@
     initRecordControls();
     initSettingsControls();
     initTargetControls();
+    initRemotePlayControls();
     connectWs();
     // Settings first: the pattern forms built by loadPatterns() take their
     // angle bounds from the servo travel it reports.

@@ -102,7 +102,8 @@ pio run -e $ENV              # compile firmware
 pio run -e $ENV -t buildfs   # build the LittleFS web UI image
 
 # with the board connected over USB-C:
-pio run -e $ENV -t upload -t uploadfs
+pio run -e $ENV -t upload
+pio run -e $ENV -t uploadfs
 pio device monitor -e $ENV -b 115200
 ```
 
@@ -141,7 +142,10 @@ Three tabs, reachable from the bottom nav:
 - **Manual** — XY trackpad (live, ~25 Hz over WebSocket) with a Light toggle
   for the D7 relay beside it, + a pattern picker per axis with generated
   parameter fields and Start/Stop. The pad's extents and the pattern forms'
-  angle fields both follow the per-axis calibration set in Settings.
+  angle fields both follow the per-axis calibration set in Settings. On a
+  Master, two extra cards sit on top: **Target** (which Node(s) the controls
+  drive) and **Play Sequence on Nodes** (make them loop a sequence saved on
+  their own flash) — see *Multi-board Master/Node mode* below.
 
   <img src="images/webui-manual.png" alt="Manual tab: XY trackpad with Light toggle, and a pattern shape per axis" width="300">
 
@@ -177,7 +181,9 @@ Three tabs, reachable from the bottom nav:
 See [docs/api.md](docs/api.md) for the full route table and payload shapes.
 WebSocket `/ws` pushes `{"type":"status", mode, x, y, relay_on, ...}` at
 ~10 Hz and accepts `{"cmd":"jog","x":123.4,"y":90.0}` and
-`{"cmd":"relay","on":true}` for low-latency manual control. (`angle` is still
+`{"cmd":"relay","on":true}` for low-latency manual control; on a Master it
+also pushes `{"type":"play_result",...}` whenever a Node answers a play
+request (`POST /api/network/play`). (`angle` is still
 sent and accepted as a deprecated alias for `x`, so anything written against
 the single-servo API keeps working.)
 
@@ -206,12 +212,18 @@ Settings → Network, all three modes:
   (`{"cmd":"remote_play","node":3,"name":"dance1"}`, `node: 0` for all at
   once) and stop it again (`remote_stop`); the next ordinary move command
   takes a Node back to live control. Needs firmware 2.3.0+ on both ends.
+  Both PC GUIs below have a **Play saved sequence on Node(s)** panel for this,
+  and so does the Master's own web UI (2.4.0+, see next paragraph).
 
   A Master's **own web UI works too**: its Manual tab gets a "Target" card
   (Settings → Network → Master) listing known Nodes as checkboxes — select
   one, several, or check "All nodes" — and the existing trackpad / Light
   toggle / Pattern controls drive that selection over ESP-NOW instead of a
-  local servo. Handy
+  local servo. Below it, **Play Sequence on Nodes** makes the selected
+  Node(s) loop a sequence saved on their own flash (type the name — the
+  Master's own saved names are suggested) and **Stop on Nodes** halts them;
+  each Node's reply (playing / no such sequence / busy recording) is listed
+  underneath. Handy
   for driving the rig by hand from a phone without any PC involved at all;
   the serial bridge above is for scripted/external control.
 

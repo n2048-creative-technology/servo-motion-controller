@@ -64,6 +64,12 @@ public:
   void startSequencePlayback(uint32_t now);
   void stopSequencePlayback();
 
+  // MASTER only: stop driving the motion sink at all (jog reapply, pattern,
+  // sequence) so the Node(s) it targets can run their own saved sequence —
+  // see NetworkLink::onHandover. Leaves RECORDING alone (it doesn't write to
+  // the sink). The next jog/pattern/sequence start takes control back.
+  void releaseLiveControl();
+
   // Called once in setup(), before WiFi/web server init, so a configured
   // pattern or sequence is already looping with zero user interaction.
   void applyAutostart(const PersistedSettings &settings, uint32_t now);

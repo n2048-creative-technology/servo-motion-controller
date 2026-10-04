@@ -8,6 +8,8 @@ Talks the line-based JSON protocol described in ../docs/serial-protocol.md:
                                          relay/light. An omitted axis holds
                                          its last commanded position.
   -> {"cmd": "list"}                     ask for the Master's known-node table
+  -> {"cmd": "remote_play", ...}         loop a sequence saved on the Node(s)
+  -> {"cmd": "remote_stop", ...}         ... and stop it (see remote_play.py)
   <- {"ok": true|false, "error": "..."}  ack/error for a move command
   <- {"type": "nodes", "nodes": [...]}   known-node table: id, x, y, light, age
 
@@ -27,6 +29,7 @@ from tkinter import ttk, messagebox
 import serial
 from serial.tools import list_ports
 
+from remote_play import RemotePlayPanel
 from serial_link import SerialLink, BAUD_RATE
 
 NODE_POLL_INTERVAL_MS = 2000
@@ -41,7 +44,7 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("Servo Rig — Master Bridge")
-        root.geometry("760x700")  # wide enough for the XY pad beside the entries
+        root.geometry("760x790")  # wide enough for the XY pad beside the entries
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self.incoming = queue.Queue()
@@ -157,6 +160,11 @@ class App:
             row=6, column=4, sticky="e"
         )
 
+        self.remote_play = RemotePlayPanel(
+            self.root, self.root, self.link, self._log, resolve_targets=self._resolve_targets
+        )
+        self.remote_play.pack(fill="x", padx=8, pady=(0, 8))
+
         log_frame = ttk.LabelFrame(self.root, text="Serial log", padding=8)
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
@@ -195,6 +203,7 @@ class App:
         self._schedule_node_poll()
 
     def _disconnect(self):
+        self.remote_play.cancel()
         self.link.disconnect()
         self._set_connected_state(False)
         self._log("-- disconnected --")
@@ -347,6 +356,7 @@ class App:
 
     def _handle_link_error(self, message):
         self._log(f"-- serial error: {message} --")
+        self.remote_play.cancel()
         self._set_connected_state(False)
 
     def _handle_incoming_line(self, text):
@@ -355,7 +365,9 @@ class App:
             msg = json.loads(text)
         except json.JSONDecodeError:
             return
-        if isinstance(msg, dict) and msg.get("type") == "nodes":
+        if not isinstance(msg, dict) or self.remote_play.handle_message(msg):
+            return
+        if msg.get("type") == "nodes":
             self.nodes = {n["id"]: n for n in msg.get("nodes", []) if "id" in n}
             self._refresh_node_table()
 
@@ -392,6 +404,7 @@ class App:
     def on_close(self):
         if self._poll_job is not None:
             self.root.after_cancel(self._poll_job)
+        self.remote_play.cancel()
         self.link.disconnect()
         self.root.destroy()
 

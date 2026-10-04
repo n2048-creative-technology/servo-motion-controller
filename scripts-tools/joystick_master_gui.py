@@ -42,6 +42,7 @@ import pygame
 import serial
 from serial.tools import list_ports
 
+from remote_play import RemotePlayPanel
 from serial_link import SerialLink, BAUD_RATE
 
 TICK_INTERVAL_MS = 40  # ~25 Hz, matches the web UI's trackpad throttle
@@ -984,7 +985,7 @@ class App:
     def __init__(self, root):
         self.root = root
         root.title("Servo Rig — Joystick Bridge")
-        root.geometry("760x900")  # tall enough for the mapping list, recording controls and log
+        root.geometry("760x980")  # tall enough for the mapping list, recording controls and log
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         pygame.init()
@@ -1132,6 +1133,14 @@ class App:
             row=4, column=2, columnspan=4, sticky="w"
         )
 
+        # Plays what "Upload to Node…" put on the Nodes, on the Nodes themselves.
+        # The PC's own CSV playback is stopped first: its next row would be a
+        # move command that pulls the Nodes straight back under live control.
+        self.remote_play = RemotePlayPanel(
+            self.root, self.root, self.link, self._log, before_play=self._stop_playback
+        )
+        self.remote_play.pack(fill="x", padx=8, pady=(0, 8))
+
         log_frame = ttk.LabelFrame(self.root, text="Serial log", padding=8)
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         self.log_text = tk.Text(log_frame, height=10, state="disabled", wrap="none")
@@ -1149,6 +1158,7 @@ class App:
 
     def _toggle_connect(self):
         if self.link.is_open:
+            self.remote_play.cancel()
             self.link.disconnect()
             self._set_connected_state(False)
             self._log("-- disconnected --")
@@ -1897,6 +1907,7 @@ class App:
                 text = self.incoming.get_nowait()
                 if text.startswith("__ERROR__"):
                     self._log(f"-- serial error: {text[len('__ERROR__'):]} --")
+                    self.remote_play.cancel()
                     self._set_connected_state(False)
                 else:
                     self._handle_incoming_line(text)
@@ -1910,7 +1921,9 @@ class App:
             msg = json.loads(text)
         except json.JSONDecodeError:
             return
-        if isinstance(msg, dict) and msg.get("type") == "nodes":
+        if not isinstance(msg, dict) or self.remote_play.handle_message(msg):
+            return
+        if msg.get("type") == "nodes":
             self.known_nodes = {n["id"]: n for n in msg.get("nodes", []) if "id" in n}
         elif isinstance(msg, dict) and msg.get("type") == "upload_result":
             self._on_upload_ack(msg)
@@ -1938,6 +1951,7 @@ class App:
             if state["job"] is not None:
                 self.root.after_cancel(state["job"])
         self._stop_playback()
+        self.remote_play.cancel()
         self.link.disconnect()
         pygame.quit()
         self.root.destroy()

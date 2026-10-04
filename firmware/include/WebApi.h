@@ -5,6 +5,8 @@
 #include <IPAddress.h>
 #include <stdint.h>
 
+#include "NetworkLink.h" // PlayAckStatus
+
 class PlaybackEngine;
 class SequenceStore;
 class SettingsStore;
@@ -24,6 +26,11 @@ public:
   // Call every loop() iteration: services DNS captive-portal requests and
   // throttles the periodic WebSocket status broadcast internally.
   void loopTick(uint32_t now);
+
+  // MASTER only: pushes a Node's PLAY_ACK (from NetworkLink::onPlayAck) to
+  // every connected browser as a {"type":"play_result",...} WebSocket frame.
+  // Call from loop()'s task, like the serial relay of the same ack.
+  void reportPlayResult(uint8_t nodeId, const char *name, PlayAckStatus status);
 
 private:
   AsyncWebServer server_{80};

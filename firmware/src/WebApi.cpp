@@ -214,6 +214,19 @@ String WebApi::buildStatusJson() {
   return out;
 }
 
+void WebApi::reportPlayResult(uint8_t nodeId, const char *name, PlayAckStatus status) {
+  if (ws_.count() == 0) return;
+  JsonDocument doc;
+  doc["type"] = "play_result";
+  doc["node"] = nodeId;
+  doc["name"] = name;
+  doc["ok"] = status == PlayAckStatus::Ok;
+  if (status != PlayAckStatus::Ok) doc["reason"] = playAckStatusReason(status);
+  String out;
+  serializeJson(doc, out);
+  ws_.textAll(out);
+}
+
 void WebApi::broadcastStatus() {
   if (ws_.count() == 0) return;
   ws_.textAll(buildStatusJson());
@@ -580,6 +593,42 @@ void WebApi::setupRoutes() {
         }
         motionSink_->setTargets(broadcastAll, ids.data(), ids.size());
         request->send(200, "application/json", "{\"ok\":true}");
+      }));
+
+  // Master only: make Node(s) loop one of the sequences saved on *their own*
+  // flash, or stop it — the web UI's side of the serial remote_play /
+  // remote_stop commands. {"node": 0 = all | id, "name": "..."}. The Node's
+  // outcome arrives later as a play_result WebSocket frame (reportPlayResult).
+  server_.addHandler(new AsyncCallbackJsonWebHandler(
+      "/api/network/play", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (!json["node"].is<int>() || !json["name"].is<const char *>()) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"expected node+name\"}");
+          return;
+        }
+        const int node = json["node"].as<int>();
+        if (node < 0 || node > NET_NODE_ID_MAX) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"node out of range\"}");
+          return;
+        }
+        const bool ok = network_->sendSeqPlay(static_cast<uint8_t>(node), json["name"].as<const char *>());
+        request->send(ok ? 200 : 400, "application/json",
+                      ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+      }));
+
+  server_.addHandler(new AsyncCallbackJsonWebHandler(
+      "/api/network/stop", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        if (!json["node"].is<int>()) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"expected node\"}");
+          return;
+        }
+        const int node = json["node"].as<int>();
+        if (node < 0 || node > NET_NODE_ID_MAX) {
+          request->send(400, "application/json", "{\"ok\":false,\"error\":\"node out of range\"}");
+          return;
+        }
+        const bool ok = network_->sendSeqHalt(static_cast<uint8_t>(node));
+        request->send(ok ? 200 : 400, "application/json",
+                      ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
       }));
 
   server_.on("/api/settings/reset", HTTP_POST, [this](AsyncWebServerRequest *request) {

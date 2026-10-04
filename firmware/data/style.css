@@ -450,3 +450,9 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
 .nodetable tbody tr[data-name] { cursor: pointer; }
 .nodetable tbody tr.selected { background: #262a31; }
 .nodetable tbody tr.selected td:first-child { color: var(--accent); font-weight: 600; }
+
+/* Node replies to "Play on Nodes", newest first. */
+.playlog { font-size: 0.85rem; color: var(--text-dim); margin-top: 8px; }
+.playlog div { padding: 2px 0; }
+.playlog .ok { color: var(--go); }
+.playlog .fail { color: var(--stop); }

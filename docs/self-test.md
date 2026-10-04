@@ -7,7 +7,7 @@ lines and free heap comfortably above ~40KB:
 
 ```
 [SELFTEST] booting servo-motion-controller
-[SELFTEST] firmware version=2.2.0
+[SELFTEST] firmware version=2.4.0
 [SELFTEST] settings loaded (version=6, autostart=0)
 [SELFTEST] servos attached X=pin10 500-2500us, Y=pin5 500-2500us
 [SELFTEST] relay pin=20 active_high, starting off

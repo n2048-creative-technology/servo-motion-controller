@@ -166,7 +166,9 @@ static constexpr uint16_t DNS_PORT = 53;
 // relay/light output on D7, servo-range-aware jog fader. 2.2.0: second servo
 // axis (pan/tilt) on D3, XY trackpad, per-axis patterns. 2.3.0: a Master can
 // tell Nodes to play/stop their own saved sequences (remote_play/remote_stop).
-static constexpr const char *FIRMWARE_VERSION = "2.3.0";
+// 2.4.0: the same from the Master's web UI (/api/network/play|stop), and a
+// remote play/stop releases the Master's own live control of that Node.
+static constexpr const char *FIRMWARE_VERSION = "2.4.0";
 
 // ---- Master/Node network (ESP-NOW) ----
 static constexpr uint8_t NET_PACKET_MAGIC = 0xE5;

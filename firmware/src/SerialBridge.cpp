@@ -223,13 +223,7 @@ void SerialBridge::reportPlayResult(uint8_t nodeId, const char *name, PlayAckSta
   out["node"] = nodeId;
   out["name"] = name;
   out["ok"] = status == PlayAckStatus::Ok;
-  if (status == PlayAckStatus::UnknownSequence) {
-    out["reason"] = "no saved sequence by that name on this Node";
-  } else if (status == PlayAckStatus::Busy) {
-    out["reason"] = "Node is recording; stop the recording first";
-  } else if (status != PlayAckStatus::Ok) {
-    out["reason"] = "unknown failure";
-  }
+  if (status != PlayAckStatus::Ok) out["reason"] = playAckStatusReason(status);
   String outStr;
   serializeJson(out, outStr);
   Serial.println(outStr);

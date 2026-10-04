@@ -54,6 +54,16 @@ public:
     return index < targets_.size() ? targets_[index] : 0;
   }
 
+  // Whether a CMD written through this sink reaches `node` (0 = all Nodes,
+  // which every selection overlaps).
+  bool drives(uint8_t node) const {
+    if (node == NET_BROADCAST_NODE || broadcastAll_ || targets_.empty()) return true;
+    for (uint8_t id : targets_) {
+      if (id == node) return true;
+    }
+    return false;
+  }
+
 private:
   void sendToTargets(float xDeg, float yDeg) {
     if (!network_) return;

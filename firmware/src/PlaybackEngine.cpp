@@ -149,6 +149,10 @@ void PlaybackEngine::stopSequencePlayback() {
   if (mode_ == PlaybackMode::SEQUENCE) mode_ = PlaybackMode::MANUAL;
 }
 
+void PlaybackEngine::releaseLiveControl() {
+  if (mode_ != PlaybackMode::RECORDING) mode_ = PlaybackMode::IDLE;
+}
+
 void PlaybackEngine::applyAutostart(const PersistedSettings &settings, uint32_t now) {
   if (!settings.autostartEnabled) {
     mode_ = PlaybackMode::IDLE;

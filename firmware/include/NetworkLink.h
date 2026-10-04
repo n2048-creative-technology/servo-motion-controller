@@ -104,6 +104,17 @@ enum class PlayAckStatus : uint8_t {
   Busy = 2,            // the Node is recording; loading would wipe the capture
 };
 
+// Human-readable PLAY_ACK failure reason ("" for Ok), shared by the serial
+// play_result line and the web UI's WebSocket play_result message.
+inline const char *playAckStatusReason(PlayAckStatus status) {
+  switch (status) {
+    case PlayAckStatus::Ok: return "";
+    case PlayAckStatus::UnknownSequence: return "no saved sequence by that name on this Node";
+    case PlayAckStatus::Busy: return "Node is recording; stop the recording first";
+  }
+  return "unknown failure";
+}
+
 struct KnownNode {
   uint8_t id = 0;
   float angleX = 0.0f;
@@ -199,6 +210,14 @@ public:
   void onSeqPlay(std::function<void(const char *name)> callback) { seqPlayCb_ = callback; }
   void onSeqHalt(std::function<void()> callback) { seqHaltCb_ = callback; }
 
+  // MASTER only: invoked synchronously whenever sendSeqPlay/sendSeqHalt hands
+  // targetNode (0 = all) over to its own playback, whichever interface asked
+  // (serial or web UI). The Master's own PlaybackEngine has to stop driving
+  // that target too: in MANUAL/PATTERN/SEQUENCE mode it keeps writing angles
+  // through NetworkMotionSink, and each write is a fresh CMD that would pull
+  // the Node straight back out of playback.
+  void onHandover(std::function<void(uint8_t targetNode)> callback) { handoverCb_ = callback; }
+
   // MASTER only: invoked when a PLAY_ACK arrives (fromNodeId, name, status).
   void onPlayAck(std::function<void(uint8_t, const char *, PlayAckStatus)> callback) {
     playAckCb_ = callback;
@@ -264,6 +283,7 @@ private:
   std::function<void(uint8_t, uint32_t)> spaceReplyCb_;
   std::function<void(const char *name)> seqPlayCb_;
   std::function<void()> seqHaltCb_;
+  std::function<void(uint8_t)> handoverCb_;
   std::function<void(uint8_t, const char *, PlayAckStatus)> playAckCb_;
   KnownNode knownNodes_[NET_MAX_TRACKED_NODES];
   LastCommand lastCommands_[NET_MAX_LAST_COMMANDS];

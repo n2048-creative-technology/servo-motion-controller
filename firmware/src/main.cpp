@@ -125,6 +125,14 @@ void setup() {
     });
     networkLink.onPlayAck([](uint8_t nodeId, const char *name, PlayAckStatus status) {
       serialBridge.reportPlayResult(nodeId, name, status);
+      webApi.reportPlayResult(nodeId, name, status);
+    });
+    // A Node handed over to its own playback must stop receiving the Master's
+    // live stream too — see NetworkLink::onHandover. Only when the Master's
+    // current target selection actually reaches that Node, so playing on
+    // Node 3 doesn't stop a pattern the Master is running on Node 5.
+    networkLink.onHandover([](uint8_t targetNode) {
+      if (networkMotionSink.drives(targetNode)) playback.releaseLiveControl();
     });
   } else if (settings.networkMode == OperatingMode::NODE) {
     networkLink.onNodeCommand([](float angleX, float angleY, bool relayOn) {

@@ -14,6 +14,8 @@ Base URL: `http://192.168.4.1` while connected to the device's AP.
 | POST | `/api/relay` | `{on}` | switches the relay/light on D7; doesn't change `mode` (see below) |
 | GET | `/api/network/targets` | — | `{broadcast_all, node_ids:[...]}` — Master only: which Node(s) `manual/jog`, WS `jog`, and `pattern/start` currently drive |
 | POST | `/api/network/targets` | `{broadcast_all, node_ids:[...]}` | Master only: retarget jog/pattern output — broadcast to all Nodes, or an explicit id list (client-side fan-out, one ESP-NOW CMD per id); ephemeral, resets to broadcast-all on reboot |
+| POST | `/api/network/play` | `{node, name}` | Master only: make Node `node` (`0` = all) loop sequence `name` saved on **its own** flash — the web side of serial `remote_play`. `{"ok":true}` means the ESP-NOW send went out; the Node's answer arrives as a WS `play_result`. Not retried by the firmware — the web UI repeats it until that ack. `400 send_failed` on a non-Master |
+| POST | `/api/network/stop` | `{node}` | Master only: stop that Node's (`0` = all) sequence playback, holding position — serial `remote_stop`. No ack; send it a few times |
 | POST | `/api/record/start` | — | clears the in-RAM recording buffer, mode → `recording` |
 | POST | `/api/record/stop` | — | mode → `manual`; buffer is kept until save/discard |
 | POST | `/api/record/save` | `{name}` | writes the buffer to `/seq/<name>.bin` (sanitized to `[A-Za-z0-9_-]`, ≤23 chars) |
@@ -94,6 +96,9 @@ not a physical servo position.
   may be omitted (it holds); `angle` is still read as X.
 - **Client → server**: `{"cmd":"relay","on":true}` — same effect as
   `POST /api/relay`.
+- **Server → client**, Master only, whenever a Node answers a play request
+  (from the web UI or serial): `{"type":"play_result","node":3,"name":"dance1","ok":true}`,
+  plus `"reason"` when `ok` is false — same shape as the serial `play_result` line.
 - **Server → client**, ~10 Hz: `{"type":"status", "mode":..., "x":..., "y":..., "relay_on":..., "uptime_ms":..., "free_heap":..., "recording":{...}, "sequence":{...}}` — same shape as `GET /api/status`.
 
 ## Pattern parameter keys

@@ -117,6 +117,11 @@ web UI's Record tab ▸ Play:
   otherwise pull it straight back out of playback. Because the broadcast
   target's resend reaches every Node, its entry is dropped too; for `node: 0`
   every entry is. A Node whose entry was dropped just holds its position.
+- If the Master's **own** web UI is driving that Node (a trackpad jog, a
+  pattern, or a sequence playing on the Master — all of which keep writing
+  positions to the selected Node(s)), the Master goes idle too, or its next
+  write would pull the Node straight back. This only happens when the
+  Master's Target selection reaches that Node. (Firmware 2.4.0+.)
 - **Any ordinary move command to that Node afterwards takes it back to live
   control** — no stop needed — and the Master resumes re-sending as before.
 - Repeating the request is harmless: a Node already looping that sequence
@@ -141,6 +146,9 @@ Same resend/ordering handling as `remote_play`. Fire-and-forget: no
 `play_result` comes back for a stop.
 
 Both commands need **firmware 2.3.0 or newer on the Master and the Node**.
+`master_gui.py` and `joystick_master_gui.py` both have a **Play saved
+sequence on Node(s)** panel that sends them (with the retries above), and a
+2.4.0 Master's own web UI has the same thing on its Manual tab.
 The packet layout didn't change, so `NET_PACKET_VERSION` didn't either: a
 Node still on older firmware keeps working with a 2.3.0 Master for
 everything else and simply ignores these two commands (no `play_result`

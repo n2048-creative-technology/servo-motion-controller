@@ -39,6 +39,22 @@
       </div>
     </div>
 
+    <div class="card" id="remotePlayCard" style="display:none;">
+      <h2>Play Sequence on Nodes</h2>
+      <p class="hint">Each Node loops a sequence saved on its <em>own</em> flash (recorded there, or uploaded
+        from a PC) &mdash; on the node(s) selected in Target above. Moving the trackpad or starting a pattern
+        here takes them back under live control.</p>
+      <div class="targetrow">
+        <input id="remotePlayName" type="text" maxlength="23" placeholder="sequence name" list="remotePlayNames">
+        <datalist id="remotePlayNames"></datalist>
+      </div>
+      <div class="btnrow">
+        <button id="remotePlayBtn" class="btn btn-go">Play on Nodes</button>
+        <button id="remoteStopBtn" class="btn btn-stop">Stop on Nodes</button>
+      </div>
+      <div id="remotePlayLog" class="playlog"></div>
+    </div>
+
     <div class="card">
       <h2>Position</h2>
       <div class="jogrow">

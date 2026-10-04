@@ -76,6 +76,13 @@ What it does:
   travels with an angle). The node table's **Light** column shows each Node's
   actual state, reported in its heartbeat, so it stays right no matter what
   switched it.
+- **Play saved sequence on Node(s)**: type (or pick) a sequence name and hit
+  **Play on Node(s)** to make the selected Node(s) loop that sequence from
+  their own flash; **Stop** halts them. A play is repeated until each Node's
+  `play_result` comes back (up to 4 tries), and the reply — playing, no such
+  sequence, or busy recording — shows under the buttons. Any later move
+  command to a Node takes it back under live control. Needs firmware 2.3.0+
+  on the Master and the Nodes (see `remote_play` in the serial-protocol doc).
 - A scrolling log of every line sent/received, for debugging.
 
 A multi-node selection is a client-side fan-out — the GUI just sends one
@@ -260,6 +267,14 @@ Workflow:
    To clear what's already saved *on a Node's own flash*, either check
    **Clear Node's saved recordings before uploading** in the Upload dialog,
    or use the **Clear All** button in that Node's own web UI (Record tab).
+9. **Play saved sequence on Node(s)** plays what step 7 put on the Nodes,
+   *on the Nodes themselves* — no PC streaming involved, so it keeps running
+   with the PC unplugged. Enter node ids (`3,5`; `0` = all) and a sequence
+   name (names you've uploaded this session are in the dropdown), then
+   **Play on Node(s)** / **Stop**. It stops the PC-side CSV **Play** first,
+   since that stream's next row would take the Nodes straight back. Same
+   panel and retry behaviour as in `master_gui.py`; moving a mapped stick
+   for a Node also takes it back under live control.
 
 The axis-mapping math, CSV round-trip (X/Y/light columns plus both older
 formats), button toggle/momentary edge handling, mapping-file compatibility,
