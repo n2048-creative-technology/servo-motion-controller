@@ -104,6 +104,48 @@ from its duration, and aborts that Node's upload with a clear error if the
 reply shows insufficient space; if no reply arrives within ~800ms it uploads
 anyway rather than blocking on an unreliable link.
 
+**Play a sequence saved on a Node** — makes that Node loop one of its own
+saved sequences (recorded on it, or uploaded as above), same effect as its own
+web UI's Record tab ▸ Play:
+```json
+{"cmd": "remote_play", "node": 3, "name": "dance1"}
+```
+- `node`: `0` tells every Node to play its own copy of `name` at once — a
+  Node without one reports `ok:false` (below) and stays where it is.
+- The Master **stops re-sending its last position** to that Node (see
+  *Robustness against dropped packets* below), since that resend would
+  otherwise pull it straight back out of playback. Because the broadcast
+  target's resend reaches every Node, its entry is dropped too; for `node: 0`
+  every entry is. A Node whose entry was dropped just holds its position.
+- **Any ordinary move command to that Node afterwards takes it back to live
+  control** — no stop needed — and the Master resumes re-sending as before.
+- Repeating the request is harmless: a Node already looping that sequence
+  keeps going instead of restarting from zero. That makes retrying safe —
+  this is a single ESP-NOW packet with no delivery guarantee, so send it two
+  or three times, or until `play_result` arrives. To restart a sequence from
+  the top, `remote_stop` it first.
+- Ordered like a move command (same `sessionId`/`seq`, see *Ordering* below):
+  a move still in flight when the play request lands can't knock the Node
+  back out of playback, and a play request delayed past newer moves is
+  dropped rather than hijacking a Node you're already driving live again.
+- Every Node starts when the packet reaches it — within a few ms of each
+  other — and then keeps time on its own clock, so Nodes playing in parallel
+  stay together for minutes but aren't locked to each other.
+
+**Stop a Node's sequence playback** — it halts and holds its current
+position (same as its web UI's Stop). `node: 0` stops every Node:
+```json
+{"cmd": "remote_stop", "node": 3}
+```
+Same resend/ordering handling as `remote_play`. Fire-and-forget: no
+`play_result` comes back for a stop.
+
+Both commands need **firmware 2.3.0 or newer on the Master and the Node**.
+The packet layout didn't change, so `NET_PACKET_VERSION` didn't either: a
+Node still on older firmware keeps working with a 2.3.0 Master for
+everything else and simply ignores these two commands (no `play_result`
+arrives).
+
 ## Replies (Master → PC)
 
 - Move command: `{"ok":true}` or `{"ok":false,"error":"..."}`
@@ -123,6 +165,13 @@ anyway rather than blocking on an unreliable link.
   Node lost power/reset partway through; an invalid name; or a write
   failure, e.g. out of space). No reply at all after a few seconds means the
   stop request itself likely didn't arrive — resend it.
+- `remote_play`/`remote_stop`: `{"ok":true}` once the ESP-NOW send
+  succeeded — not confirmation the Node started; that's `play_result`.
+- `play_result` (asynchronous, one per Node that received a `remote_play`):
+  `{"type":"play_result","node":3,"name":"dance1","ok":true}`. On
+  `ok:false` a `"reason"` says why: no saved sequence by that name on the
+  Node, or the Node is busy recording (loading would wipe the capture).
+  Nothing back after a moment means the request was probably lost — resend.
 - `space_reply` (asynchronous, reply to `space_query`):
   `{"type":"space_reply","node":3,"free_bytes":48200}`.
 - Malformed line: `{"ok":false,"error":"bad_json"}`

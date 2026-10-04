@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "NetworkLink.h" // SeqAckStatus
+#include "NetworkLink.h" // SeqAckStatus, PlayAckStatus
 
 class NetworkLink;
 
@@ -23,6 +23,9 @@ public:
   // just retry, or that the Node likely reset mid-upload, or its flash is
   // actually full.
   void reportUploadResult(uint8_t nodeId, const char *name, SeqAckStatus status, uint16_t points);
+
+  // Relays a PLAY_ACK (from NetworkLink::onPlayAck) to the PC.
+  void reportPlayResult(uint8_t nodeId, const char *name, PlayAckStatus status);
 
   // Relays a SPACE_REPLY (from NetworkLink::onSpaceReply) to the PC.
   void reportSpaceReply(uint8_t nodeId, uint32_t freeBytes);

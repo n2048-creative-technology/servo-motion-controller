@@ -123,6 +123,9 @@ void setup() {
     networkLink.onSpaceReply([](uint8_t nodeId, uint32_t freeBytes) {
       serialBridge.reportSpaceReply(nodeId, freeBytes);
     });
+    networkLink.onPlayAck([](uint8_t nodeId, const char *name, PlayAckStatus status) {
+      serialBridge.reportPlayResult(nodeId, name, status);
+    });
   } else if (settings.networkMode == OperatingMode::NODE) {
     networkLink.onNodeCommand([](float angleX, float angleY, bool relayOn) {
       playback.onNetworkCommand(angleX, angleY, relayOn, millis());
@@ -158,6 +161,35 @@ void setup() {
     });
     networkLink.onSeqClear([]() { sequenceStore.clearAll(); });
     networkLink.onSpaceQuery([]() { networkLink.sendSpaceReply(SequenceStore::freeSpaceBytes()); });
+    // Remote play/stop: the same calls the local /api/sequence/play|stop
+    // routes make (see WebApi.cpp).
+    networkLink.onSeqPlay([](const char *name) {
+      // Loading reuses the recording buffer, so it would wipe a capture in
+      // progress (e.g. an upload) — refuse instead.
+      if (playback.mode() == PlaybackMode::RECORDING) {
+        networkLink.sendPlayAck(name, PlayAckStatus::Busy);
+        return;
+      }
+      // Already looping this one: a repeated request (PC tools send it more
+      // than once for delivery robustness) must not restart it from zero.
+      char safeName[SEQ_NAME_MAX_LEN + 1];
+      if (playback.mode() == PlaybackMode::SEQUENCE &&
+          SequenceStore::sanitizeName(name, safeName, sizeof(safeName)) &&
+          strcmp(safeName, sequenceStore.activeName()) == 0) {
+        networkLink.sendPlayAck(name, PlayAckStatus::Ok);
+        return;
+      }
+      if (sequenceStore.loadNamed(name)) {
+        playback.startSequencePlayback(millis());
+        networkLink.sendPlayAck(name, PlayAckStatus::Ok);
+      } else {
+        // loadNamed() has already emptied the buffer, so don't leave a
+        // previously playing sequence "playing" nothing.
+        playback.stopSequencePlayback();
+        networkLink.sendPlayAck(name, PlayAckStatus::UnknownSequence);
+      }
+    });
+    networkLink.onSeqHalt([]() { playback.stopSequencePlayback(); });
   }
   playback.begin(sink, &sequenceStore, relaySink);
   playback.setAngleLimits(settings.servoX.minAngle, settings.servoX.maxAngle, settings.servoY.minAngle,

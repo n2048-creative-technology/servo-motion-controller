@@ -31,7 +31,7 @@
   // silently be older than the other — which looks exactly like "the feature
   // doesn't work" rather than "half of it isn't on the board". Comparing them
   // at runtime turns that into a visible banner instead of a hunt.
-  const UI_VERSION = "2.2.0";
+  const UI_VERSION = "2.3.0";
 
   let patternCatalog = []; // [{type,label,params:[...]}]
   let ws = null;
