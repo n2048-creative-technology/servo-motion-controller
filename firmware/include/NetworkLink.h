@@ -18,6 +18,10 @@
 // PlaybackEngine::onNetworkCommand), then SEQ_STOP tells it to save the
 // result under a name. SEQ_ACK: Node -> Master, reports whether that save
 // succeeded (and how many points), relayed to the PC over serial.
+// SEQ_PLAY/SEQ_HALT: Master -> Node(s), start looping one of the Node's own
+// saved sequences by name / stop it (holding position), exactly like that
+// Node's own /api/sequence/play|stop would. PLAY_ACK: Node -> Master, reports
+// whether SEQ_PLAY actually started playback.
 //
 // sessionId/seq (CMD only) let a Node tell a stale/delayed packet apart from
 // the current one: sessionId is randomized once when a Master boots, seq
@@ -27,19 +31,24 @@
 // exactly when resends are most likely to matter) would yank the servo back
 // to a stale angle instead of being ignored. SEQ_START/STOP don't carry
 // this — they're rare one-shot actions, not a continuous stream, so the PC
-// tool just retries on a timeout instead.
+// tool just retries on a timeout instead. SEQ_PLAY/SEQ_HALT *do* carry it,
+// from the same counter as CMD: they hand a Node over from live control to
+// its own playback (and back), so they have to be ordered against the CMD
+// stream — a CMD resend still in flight when SEQ_PLAY lands must not knock
+// the Node straight back out of playback, and a SEQ_PLAY delayed past newer
+// CMDs must not hijack a Node the PC has already resumed driving live.
 struct NetPacket {
   uint8_t magic = NET_PACKET_MAGIC;
   uint8_t version = NET_PACKET_VERSION;
-  uint8_t type = 0;        // 1=CMD, 2=HELLO, 3=SEQ_START, 4=SEQ_STOP, 5=SEQ_ACK
+  uint8_t type = 0;        // NET_PACKET_TYPE_* below
   uint8_t targetNode = 0;  // CMD/SEQ_START/SEQ_STOP: 0=all nodes, else specific node id
   uint8_t nodeId = 0;      // HELLO/SEQ_ACK only: sender's own node id
   float angleX = 0.0f;     // CMD: target X (pan) / HELLO: current X
   float angleY = 0.0f;     // CMD: target Y (tilt) / HELLO: current Y
-  uint32_t sessionId = 0;  // CMD only: randomized per Master boot
-  uint32_t seq = 0;        // CMD only: monotonically increasing per session
-  char seqName[24] = {0};  // SEQ_STOP/SEQ_ACK only: sequence name, sanitized+truncated
-  uint8_t status = 0;      // SEQ_ACK only: 0 = saved OK, nonzero = a SeqAckStatus reason code
+  uint32_t sessionId = 0;  // CMD/SEQ_PLAY/SEQ_HALT: randomized per Master boot
+  uint32_t seq = 0;        // CMD/SEQ_PLAY/SEQ_HALT: monotonically increasing per session
+  char seqName[24] = {0};  // SEQ_STOP/SEQ_ACK/SEQ_PLAY/PLAY_ACK: sequence name, sanitized+truncated
+  uint8_t status = 0;      // SEQ_ACK/PLAY_ACK: 0 = OK, nonzero = a SeqAckStatus/PlayAckStatus reason
   uint16_t pointCount = 0; // SEQ_ACK only: points captured/saved
   uint32_t freeBytes = 0;  // SPACE_REPLY only: bytes free in the Node's LittleFS
   // CMD: the relay/light state that goes with this angle. Carried on every
@@ -68,6 +77,13 @@ static constexpr uint8_t NET_PACKET_TYPE_SEQ_CLEAR = 6;
 // freeBytes.
 static constexpr uint8_t NET_PACKET_TYPE_SPACE_QUERY = 7;
 static constexpr uint8_t NET_PACKET_TYPE_SPACE_REPLY = 8;
+// Master -> Node(s): loop the Node's own saved sequence `seqName`; SEQ_HALT
+// stops it. Added without changing the packet layout, so NET_PACKET_VERSION
+// stays put: a Node on older firmware just ignores both types. PLAY_ACK:
+// Node -> Master, the outcome of a SEQ_PLAY (status = PlayAckStatus).
+static constexpr uint8_t NET_PACKET_TYPE_SEQ_PLAY = 9;
+static constexpr uint8_t NET_PACKET_TYPE_SEQ_HALT = 10;
+static constexpr uint8_t NET_PACKET_TYPE_PLAY_ACK = 11;
 
 // SEQ_ACK's status byte when saving failed, distinguishing *why* — surfaced
 // to the PC as human-readable text (see SerialBridge::reportUploadResult)
@@ -79,6 +95,13 @@ enum class SeqAckStatus : uint8_t {
   NoPointsCaptured = 1, // recording never started (SEQ_START lost, or the Node reset mid-transfer)
   InvalidName = 2,      // name sanitized to nothing
   WriteFailed = 3,      // LittleFS open/write failed (e.g. out of space)
+};
+
+// PLAY_ACK's status byte: whether a SEQ_PLAY started playback, and why not.
+enum class PlayAckStatus : uint8_t {
+  Ok = 0,
+  UnknownSequence = 1, // no saved sequence by that name (or it failed to load)
+  Busy = 2,            // the Node is recording; loading would wipe the capture
 };
 
 struct KnownNode {
@@ -172,6 +195,15 @@ public:
   // MASTER only: invoked when a SPACE_REPLY arrives (fromNodeId, freeBytes).
   void onSpaceReply(std::function<void(uint8_t, uint32_t)> callback) { spaceReplyCb_ = callback; }
 
+  // NODE only: invoked when a SEQ_PLAY/SEQ_HALT addressed to us arrives.
+  void onSeqPlay(std::function<void(const char *name)> callback) { seqPlayCb_ = callback; }
+  void onSeqHalt(std::function<void()> callback) { seqHaltCb_ = callback; }
+
+  // MASTER only: invoked when a PLAY_ACK arrives (fromNodeId, name, status).
+  void onPlayAck(std::function<void(uint8_t, const char *, PlayAckStatus)> callback) {
+    playAckCb_ = callback;
+  }
+
   // MASTER only: remotely start/stop-and-save a recording on targetNode.
   bool sendSeqStart(uint8_t targetNode);
   bool sendSeqStop(uint8_t targetNode, const char *name);
@@ -182,11 +214,22 @@ public:
   // MASTER only: ask targetNode how much LittleFS space it has free.
   bool sendSpaceQuery(uint8_t targetNode);
 
+  // MASTER only: make targetNode (0 = all) loop its own saved sequence `name`,
+  // or stop whatever it's playing. Both stop the periodic CMD resend to that
+  // target (see forgetLastCommands) — otherwise the resend would take the
+  // Node straight back out of playback within NET_CMD_RESEND_INTERVAL_MS.
+  // Any later sendCommand() to the target resumes live control as before.
+  bool sendSeqPlay(uint8_t targetNode, const char *name);
+  bool sendSeqHalt(uint8_t targetNode);
+
   // NODE only: reports the outcome of a SEQ_STOP back to the Master.
   bool sendSeqAck(const char *name, SeqAckStatus status, uint16_t pointCount);
 
   // NODE only: reports free LittleFS space back to the Master.
   bool sendSpaceReply(uint32_t freeBytes);
+
+  // NODE only: reports the outcome of a SEQ_PLAY back to the Master.
+  bool sendPlayAck(const char *name, PlayAckStatus status);
 
   // MASTER only: read-only view of the known-node table for WebApi/SerialBridge.
   const KnownNode *knownNodes() const { return knownNodes_; }
@@ -219,6 +262,9 @@ private:
   std::function<void()> spaceQueryCb_;
   std::function<void(uint8_t, const char *, SeqAckStatus, uint16_t)> seqAckCb_;
   std::function<void(uint8_t, uint32_t)> spaceReplyCb_;
+  std::function<void(const char *name)> seqPlayCb_;
+  std::function<void()> seqHaltCb_;
+  std::function<void(uint8_t, const char *, PlayAckStatus)> playAckCb_;
   KnownNode knownNodes_[NET_MAX_TRACKED_NODES];
   LastCommand lastCommands_[NET_MAX_LAST_COMMANDS];
 
@@ -236,7 +282,10 @@ private:
   // clobber a first, still-undrained one, losing its confirmation entirely
   // (observed in practice: concurrent multi-Node uploads reproducibly
   // losing every ack even though every Node actually saved successfully).
+  // PLAY_ACKs share this FIFO with SEQ_ACKs (same fields, `isPlay` tells
+  // them apart), so both reach Serial from loop()'s task in arrival order.
   struct PendingAck {
+    bool isPlay = false;
     uint8_t nodeId = 0;
     char name[24] = {0};
     SeqAckStatus status = SeqAckStatus::Ok;
@@ -269,12 +318,19 @@ private:
   char pendingStopName_[24] = {0};
   bool pendingSeqClear_ = false;
   bool pendingSpaceQuery_ = false;
+  // SEQ_PLAY loads a sequence file (up to ~96KB) — same reason to defer it.
+  bool pendingSeqPlay_ = false;
+  char pendingPlayName_[24] = {0};
+  bool pendingSeqHalt_ = false;
 
   const LastCommand *findLastCommand(uint8_t targetNode) const;
   void recordHello(uint8_t fromNodeId, float angleX, float angleY, bool relayOn, uint32_t now);
   void recordLastCommand(uint8_t targetNode, float angleX, float angleY, bool relayOn, uint32_t now);
   bool transmitCommand(uint8_t targetNode, float angleX, float angleY, bool relayOn);
   void resendDueCommands(uint32_t now);
+  void forgetLastCommands(uint8_t targetNode);
+  bool transmitOrdered(uint8_t type, uint8_t targetNode, const char *name);
+  bool acceptOrdered(const NetPacket &pkt);
 
 public:
   // Called from the ESP-NOW C callback trampoline; not part of the public

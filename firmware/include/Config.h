@@ -164,8 +164,9 @@ static constexpr uint16_t DNS_PORT = 53;
 // only way to tell from the outside which build a board is actually running
 // (GET /api/status, and the Settings tab shows it). 2.1.0: RANDOM pattern,
 // relay/light output on D7, servo-range-aware jog fader. 2.2.0: second servo
-// axis (pan/tilt) on D3, XY trackpad, per-axis patterns.
-static constexpr const char *FIRMWARE_VERSION = "2.2.0";
+// axis (pan/tilt) on D3, XY trackpad, per-axis patterns. 2.3.0: a Master can
+// tell Nodes to play/stop their own saved sequences (remote_play/remote_stop).
+static constexpr const char *FIRMWARE_VERSION = "2.3.0";
 
 // ---- Master/Node network (ESP-NOW) ----
 static constexpr uint8_t NET_PACKET_MAGIC = 0xE5;

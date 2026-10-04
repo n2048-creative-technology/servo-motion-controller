@@ -102,6 +102,36 @@ void SerialBridge::handleLine(const char *line) {
     return;
   }
 
+  if (strcmp(cmd, "remote_play") == 0) {
+    if (!doc["node"].is<int>() || !doc["name"].is<const char *>()) {
+      Serial.println("{\"ok\":false,\"error\":\"expected node+name\"}");
+      return;
+    }
+    int node = doc["node"].as<int>();
+    if (node < 0 || node > NET_NODE_ID_MAX) {
+      Serial.println("{\"ok\":false,\"error\":\"node out of range\"}");
+      return;
+    }
+    bool ok = network_->sendSeqPlay(static_cast<uint8_t>(node), doc["name"].as<const char *>());
+    Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+    return;
+  }
+
+  if (strcmp(cmd, "remote_stop") == 0) {
+    if (!doc["node"].is<int>()) {
+      Serial.println("{\"ok\":false,\"error\":\"expected node\"}");
+      return;
+    }
+    int node = doc["node"].as<int>();
+    if (node < 0 || node > NET_NODE_ID_MAX) {
+      Serial.println("{\"ok\":false,\"error\":\"node out of range\"}");
+      return;
+    }
+    bool ok = network_->sendSeqHalt(static_cast<uint8_t>(node));
+    Serial.println(ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"send_failed\"}");
+    return;
+  }
+
   if (strcmp(cmd, "list") == 0) {
     JsonDocument out;
     out["type"] = "nodes";
@@ -182,6 +212,24 @@ void SerialBridge::reportUploadResult(uint8_t nodeId, const char *name, SeqAckSt
   out["ok"] = status == SeqAckStatus::Ok;
   out["points"] = points;
   if (status != SeqAckStatus::Ok) out["reason"] = seqAckStatusReason(status);
+  String outStr;
+  serializeJson(out, outStr);
+  Serial.println(outStr);
+}
+
+void SerialBridge::reportPlayResult(uint8_t nodeId, const char *name, PlayAckStatus status) {
+  JsonDocument out;
+  out["type"] = "play_result";
+  out["node"] = nodeId;
+  out["name"] = name;
+  out["ok"] = status == PlayAckStatus::Ok;
+  if (status == PlayAckStatus::UnknownSequence) {
+    out["reason"] = "no saved sequence by that name on this Node";
+  } else if (status == PlayAckStatus::Busy) {
+    out["reason"] = "Node is recording; stop the recording first";
+  } else if (status != PlayAckStatus::Ok) {
+    out["reason"] = "unknown failure";
+  }
   String outStr;
   serializeJson(out, outStr);
   Serial.println(outStr);

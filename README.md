@@ -202,6 +202,10 @@ Settings → Network, all three modes:
   to every Node in ESP-NOW range. See [docs/serial-protocol.md](docs/serial-protocol.md)
   for the wire format (`{"node":3,"x":120.5,"y":90.0}`, `{"cmd":"list"}`,
   etc.) and a `pyserial` example. A Master needs no servos attached.
+  It can also tell Nodes to loop a sequence saved on their own flash
+  (`{"cmd":"remote_play","node":3,"name":"dance1"}`, `node: 0` for all at
+  once) and stop it again (`remote_stop`); the next ordinary move command
+  takes a Node back to live control. Needs firmware 2.3.0+ on both ends.
 
   A Master's **own web UI works too**: its Manual tab gets a "Target" card
   (Settings → Network → Master) listing known Nodes as checkboxes — select

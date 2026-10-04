@@ -82,7 +82,11 @@ void NetworkLink::loopTick(uint32_t now) {
     PendingAck ack = pendingAcks_[0];
     for (uint8_t i = 1; i < pendingAckCount_; i++) pendingAcks_[i - 1] = pendingAcks_[i];
     pendingAckCount_--;
-    if (seqAckCb_) seqAckCb_(ack.nodeId, ack.name, ack.status, ack.points);
+    if (ack.isPlay) {
+      if (playAckCb_) playAckCb_(ack.nodeId, ack.name, static_cast<PlayAckStatus>(ack.status));
+    } else if (seqAckCb_) {
+      seqAckCb_(ack.nodeId, ack.name, ack.status, ack.points);
+    }
   }
 
   while (pendingSpaceReplyCount_ > 0) {
@@ -107,6 +111,14 @@ void NetworkLink::loopTick(uint32_t now) {
   if (pendingSpaceQuery_) {
     pendingSpaceQuery_ = false;
     if (spaceQueryCb_) spaceQueryCb_();
+  }
+  if (pendingSeqPlay_) {
+    pendingSeqPlay_ = false;
+    if (seqPlayCb_) seqPlayCb_(pendingPlayName_);
+  }
+  if (pendingSeqHalt_) {
+    pendingSeqHalt_ = false;
+    if (seqHaltCb_) seqHaltCb_();
   }
 }
 
@@ -231,6 +243,70 @@ bool NetworkLink::sendSpaceReply(uint32_t freeBytes) {
   return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
 }
 
+void NetworkLink::forgetLastCommands(uint8_t targetNode) {
+  // The broadcast entry's resend reaches every Node, so it has to go too
+  // whichever Node is handed over to playback; handing over "all" (0) clears
+  // every per-Node entry as well. A Node whose entry is dropped simply holds
+  // its last position — it re-applies that itself (SERVO_REAPPLY_INTERVAL_MS).
+  for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
+    LastCommand &cmd = lastCommands_[i];
+    if (!cmd.inUse) continue;
+    if (targetNode == NET_BROADCAST_NODE || cmd.targetNode == targetNode ||
+        cmd.targetNode == NET_BROADCAST_NODE) {
+      cmd.inUse = false;
+    }
+  }
+}
+
+bool NetworkLink::transmitOrdered(uint8_t type, uint8_t targetNode, const char *name) {
+  NetPacket pkt;
+  pkt.type = type;
+  pkt.targetNode = targetNode;
+  if (name) strncpy(pkt.seqName, name, sizeof(pkt.seqName) - 1);
+  // Same session/counter as CMD — see the ordering note on NetPacket.
+  pkt.sessionId = sessionId_;
+  pkt.seq = nextSeq_++;
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::sendSeqPlay(uint8_t targetNode, const char *name) {
+  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
+  forgetLastCommands(targetNode);
+  return transmitOrdered(NET_PACKET_TYPE_SEQ_PLAY, targetNode, name);
+}
+
+bool NetworkLink::sendSeqHalt(uint8_t targetNode) {
+  if (!espNowReady_ || mode_ != OperatingMode::MASTER) return false;
+  forgetLastCommands(targetNode);
+  return transmitOrdered(NET_PACKET_TYPE_SEQ_HALT, targetNode, nullptr);
+}
+
+bool NetworkLink::sendPlayAck(const char *name, PlayAckStatus status) {
+  if (!espNowReady_ || mode_ != OperatingMode::NODE) return false;
+  NetPacket pkt;
+  pkt.type = NET_PACKET_TYPE_PLAY_ACK;
+  pkt.nodeId = nodeId_;
+  strncpy(pkt.seqName, name, sizeof(pkt.seqName) - 1);
+  pkt.status = static_cast<uint8_t>(status);
+  return esp_now_send(kBroadcastMac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt)) == ESP_OK;
+}
+
+bool NetworkLink::acceptOrdered(const NetPacket &pkt) {
+  // Reject anything older than the last command we already applied, so a
+  // resend or retransmit that got delayed in transit can't yank the servo
+  // back to a stale angle after a fresher one already arrived. A changed
+  // sessionId means the Master rebooted (its seq restarted from 0), so
+  // that always wins over whatever session we'd been tracking.
+  const bool newSession = !haveSession_ || pkt.sessionId != lastSessionId_;
+  const bool newerInSession = !newSession && (int32_t)(pkt.seq - lastAppliedSeq_) > 0;
+  if (!newSession && !newerInSession) return false;
+
+  haveSession_ = true;
+  lastSessionId_ = pkt.sessionId;
+  lastAppliedSeq_ = pkt.seq;
+  return true;
+}
+
 void NetworkLink::resendDueCommands(uint32_t now) {
   for (uint8_t i = 0; i < NET_MAX_LAST_COMMANDS; i++) {
     LastCommand &cmd = lastCommands_[i];
@@ -290,20 +366,21 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     // Corrupted/garbage payload: never let this reach a servo. Both axes are
     // checked, since one bad float would otherwise still be written.
     if (!isfinite(pkt.angleX) || !isfinite(pkt.angleY)) return;
-
-    // Reject anything older than the last command we already applied, so a
-    // resend or retransmit that got delayed in transit can't yank the servo
-    // back to a stale angle after a fresher one already arrived. A changed
-    // sessionId means the Master rebooted (its seq restarted from 0), so
-    // that always wins over whatever session we'd been tracking.
-    const bool newSession = !haveSession_ || pkt.sessionId != lastSessionId_;
-    const bool newerInSession = !newSession && (int32_t)(pkt.seq - lastAppliedSeq_) > 0;
-    if (!newSession && !newerInSession) return;
-
-    haveSession_ = true;
-    lastSessionId_ = pkt.sessionId;
-    lastAppliedSeq_ = pkt.seq;
+    if (!acceptOrdered(pkt)) return;
     if (nodeCommandCb_) nodeCommandCb_(pkt.angleX, pkt.angleY, pkt.relayOn != 0);
+  } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_PLAY) {
+    if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
+    if (!acceptOrdered(pkt)) return;
+    pkt.seqName[sizeof(pkt.seqName) - 1] = '\0';
+    strncpy(pendingPlayName_, pkt.seqName, sizeof(pendingPlayName_) - 1);
+    pendingPlayName_[sizeof(pendingPlayName_) - 1] = '\0';
+    pendingSeqHalt_ = false; // the newer of the two wins
+    pendingSeqPlay_ = true;
+  } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_HALT) {
+    if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
+    if (!acceptOrdered(pkt)) return;
+    pendingSeqPlay_ = false;
+    pendingSeqHalt_ = true;
   } else if (mode_ == OperatingMode::NODE && pkt.type == NET_PACKET_TYPE_SEQ_START) {
     if (pkt.targetNode != NET_BROADCAST_NODE && pkt.targetNode != nodeId_) return;
     // Deferred to loopTick() — see the pendingSeqStart_/pendingSeqStop_
@@ -327,6 +404,7 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     // see the pendingAcks_ fields' comment in NetworkLink.h.
     if (pendingAckCount_ < NET_MAX_PENDING_ACKS) {
       PendingAck &slot = pendingAcks_[pendingAckCount_++];
+      slot.isPlay = false;
       slot.nodeId = pkt.nodeId;
       strncpy(slot.name, pkt.seqName, sizeof(slot.name) - 1);
       slot.name[sizeof(slot.name) - 1] = '\0';
@@ -336,6 +414,17 @@ void NetworkLink::onRecv(const uint8_t *data, int len) {
     // else: more acks arrived than loop() has drained — drop the overflow
     // rather than corrupt an existing slot; the PC side already retries a
     // SEQ_STOP it never got confirmation for.
+  } else if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_PLAY_ACK) {
+    pkt.seqName[sizeof(pkt.seqName) - 1] = '\0';
+    if (pendingAckCount_ < NET_MAX_PENDING_ACKS) {
+      PendingAck &slot = pendingAcks_[pendingAckCount_++];
+      slot.isPlay = true;
+      slot.nodeId = pkt.nodeId;
+      strncpy(slot.name, pkt.seqName, sizeof(slot.name) - 1);
+      slot.name[sizeof(slot.name) - 1] = '\0';
+      slot.status = static_cast<SeqAckStatus>(pkt.status); // raw code; loopTick re-casts it
+      slot.points = 0;
+    }
   } else if (mode_ == OperatingMode::MASTER && pkt.type == NET_PACKET_TYPE_SPACE_REPLY) {
     if (pendingSpaceReplyCount_ < NET_MAX_PENDING_ACKS) {
       PendingSpaceReply &slot = pendingSpaceReplies_[pendingSpaceReplyCount_++];
