@@ -1,6 +1,6 @@
 # scripts-tools
 
-PC-side tools for this project. `master_gui.py` and `joystick_master_gui.py`
+PC-side tools for this project. `master_gui.py`, `joystick_master_gui.py` and `remote_sequence.py`
 talk to a Master board over USB serial using the protocol in
 [../docs/serial-protocol.md](../docs/serial-protocol.md) — `serial_link.py`
 is their shared connection code, not a standalone tool. `upload_all.py` is a
@@ -90,6 +90,28 @@ A multi-node selection is a client-side fan-out — the GUI just sends one
 quick succession.
 The wire protocol itself is unchanged; see the serial-protocol doc for the
 full command/reply reference.
+
+## `remote_sequence.py`
+
+Command-line version of the **Play saved sequence on Node(s)** panel: makes
+every Node the Master currently knows about loop a sequence saved on its own
+flash.
+
+```bash
+python3 remote_sequence.py dance1                     # find the Master, play 'dance1' on all its Nodes
+python3 remote_sequence.py dance1 --port /dev/ttyACM0 # skip the port probe
+```
+
+Without `--port` it sends `{"cmd":"list"}` to every serial port and uses the
+one that answers with a node table (a Node's own USB port answers
+`not_master`). If that table is still empty — a Master just opened may not
+have heard every heartbeat yet — it keeps asking for up to 4 s. Each listed
+Node then gets its own `remote_play`, repeated every 400 ms until its
+`play_result` arrives (up to 4 tries), and the script prints one line per
+Node: playing, can't play (no such sequence / busy recording), or no reply.
+Exit status is 0 only if every Node is playing, so it can be chained in
+shell scripts. Needs only `pyserial` (no Tkinter). Tested against a fake
+Master on a pseudo-terminal, not yet on hardware.
 
 ## `joystick_master_gui.py`
 
