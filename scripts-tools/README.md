@@ -113,6 +113,58 @@ Exit status is 0 only if every Node is playing, so it can be chained in
 shell scripts. Needs only `pyserial` (no Tkinter). Tested against a fake
 Master on a pseudo-terminal, not yet on hardware.
 
+## `sequence_csv.py`
+
+Not a standalone tool — the shared recording CSV format (load/save/resample)
+used by `joystick_master_gui.py`, `combine_recordings.py` and
+`play_recording.py`, so all three read and write the exact same shape
+without drifting out of sync.
+
+## `combine_recordings.py`
+
+Combines several per-node recordings — made one Node at a time — into one
+CSV with every Node's columns side by side, ready for `play_recording.py`
+or for uploading to the Nodes via `joystick_master_gui.py`.
+
+```bash
+python3 combine_recordings.py node1.csv node2.csv node3.csv -o combined.csv
+python3 combine_recordings.py 3=pan.csv 3=light.csv 5=dance.csv -o combined.csv
+```
+
+A plain `file.csv` keeps whichever Node id(s) its own header already has. An
+explicit `<node_id>=file.csv` instead forces every column in that
+(single-node) file onto the given Node id — for the common case of
+recording every Node's part on the same single test rig/controller, each
+take coming out tagged as whichever Node happened to be plugged in, and
+needing to be reassigned to its real Node once combined. Each input keeps
+its own timeline (every file's `t_ms` starts wherever it started) — inputs
+are not time-shifted or spliced into one continuous take, just layered
+together; row N of the output is "every node at the time offset recorded in
+row N of its own source". A node+channel combination supplied by more than
+one input is a hard error rather than a silent overwrite, since picking one
+silently is exactly the kind of mistake that's invisible until showtime.
+
+## `play_recording.py`
+
+Plays a combined (or any) recording from the PC, through the Master, into
+the Nodes in real time — the command-line, no-Tkinter/pygame version of
+`joystick_master_gui.py`'s Load CSV + Play panel. Nothing is saved to the
+Nodes' flash; it streams ordinary move commands, so unplugging the PC
+leaves the Nodes holding their last position.
+
+```bash
+python3 play_recording.py combined.csv                   # plays once, no loop
+python3 play_recording.py combined.csv --loop             # repeats until Ctrl-C
+python3 play_recording.py combined.csv --loop --speed 0.5
+python3 play_recording.py combined.csv --port /dev/ttyACM0
+```
+
+**Playback is not looped unless `--loop` is passed** — by default it plays
+through once and exits, leaving the Nodes at their final commanded
+position, same as the GUI's non-loop Play. `--speed` (0.1–2.0, default 1.0)
+resamples the same way the GUI does. Uses the same Master auto-probe as
+`remote_sequence.py` (`--port` to skip it). Needs only `pyserial`.
+
 ## `joystick_master_gui.py`
 
 Drive Nodes from a physical joystick/gamepad instead of on-screen sliders,

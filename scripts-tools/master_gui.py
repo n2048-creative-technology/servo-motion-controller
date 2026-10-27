@@ -8,7 +8,7 @@ Talks the line-based JSON protocol described in ../docs/serial-protocol.md:
                                          relay/light. An omitted axis holds
                                          its last commanded position.
   -> {"cmd": "list"}                     ask for the Master's known-node table
-  -> {"cmd": "remote_play", ...}         loop a sequence saved on the Node(s)
+  -> {"cmd": "remote_play", ...}         play a sequence saved on the Node(s) once
   -> {"cmd": "remote_stop", ...}         ... and stop it (see remote_play.py)
   <- {"ok": true|false, "error": "..."}  ack/error for a move command
   <- {"type": "nodes", "nodes": [...]}   known-node table: id, x, y, light, age

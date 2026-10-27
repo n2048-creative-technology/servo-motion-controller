@@ -6,13 +6,15 @@ Speaks the remote_play / remote_stop commands from ../docs/serial-protocol.md:
   -> {"cmd": "remote_stop", "node": <0-250>}
   <- {"type": "play_result", "node": N, "name": "...", "ok": bool, "reason": "..."}
 
-Each Node loops a sequence saved on its *own* flash (recorded there, or
+Each Node plays (once) a sequence saved on its *own* flash (recorded there, or
 uploaded with joystick_master_gui.py's "Upload to Node…"). ESP-NOW broadcast
 has no link-level ack, so a play is repeated until that Node's play_result
-arrives (or we give up), and a stop is simply sent a few times. Both are safe
-to repeat: a Node ignores a play of the sequence it's already looping.
+arrives (or we give up), and a stop is simply sent a few times. Every retry of
+one press carries the same play_id, so the Node ignores the repeats; a new
+press gets a new id and restarts the sequence from the top.
 """
 
+import random
 import re
 import tkinter as tk
 from tkinter import ttk
@@ -133,21 +135,22 @@ class RemotePlayPanel(ttk.LabelFrame):
         self._cancel_pending()
         self.add_names([name])
         self.status_var.set(f"asking {self._describe(nodes)} to play '{name}'…")
+        play_id = random.randint(1, 0xFFFFFFFF)
         for node in nodes:
-            self._play_attempt(node, name, 1)
+            self._play_attempt(node, name, play_id, 1)
 
-    def _play_attempt(self, node, name, attempt):
+    def _play_attempt(self, node, name, play_id, attempt):
         self._retries.pop(node, None)
-        if not self._send({"cmd": "remote_play", "node": node, "name": name}):
+        if not self._send({"cmd": "remote_play", "node": node, "name": name, "play_id": play_id}):
             return
         if node == 0:
             # "All" can't know when every Node has answered, so it just
             # repeats a fixed number of times; acks are still shown as they come.
             if attempt < ATTEMPTS:
-                self._jobs.append(self.root.after(RETRY_INTERVAL_MS, self._play_attempt, 0, name, attempt + 1))
+                self._jobs.append(self.root.after(RETRY_INTERVAL_MS, self._play_attempt, 0, name, play_id, attempt + 1))
             return
         if attempt < ATTEMPTS:
-            self._retries[node] = self.root.after(RETRY_INTERVAL_MS, self._play_attempt, node, name, attempt + 1)
+            self._retries[node] = self.root.after(RETRY_INTERVAL_MS, self._play_attempt, node, name, play_id, attempt + 1)
         else:
             # Last attempt sent; give its reply one more interval to arrive.
             self._retries[node] = self.root.after(RETRY_INTERVAL_MS, self._give_up, node, name)

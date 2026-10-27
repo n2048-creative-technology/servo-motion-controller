@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Make every Node the Master currently knows about loop one of its own saved
-sequences — the command-line version of the GUIs' "Play saved sequence on
+"""Make every Node the Master currently knows about play (once) one of its own
+saved sequences — the command-line version of the GUIs' "Play saved sequence on
 Node(s)" panel (remote_play.py).
 
 Usage:
@@ -12,18 +12,21 @@ answering with a node table is used (a Node's own USB port answers
 "not_master"). Speaks ../docs/serial-protocol.md:
   -> {"cmd": "list"}
   <- {"type": "nodes", "nodes": [{"id": 3, ...}, ...]}
-  -> {"cmd": "remote_play", "node": <id>, "name": "<sequence>"}
+  -> {"cmd": "remote_play", "node": <id>, "name": "<sequence>", "play_id": <n>}
   <- {"type": "play_result", "node": N, "name": "...", "ok": bool, "reason": "..."}
 
 Each Node is addressed by its own id, not broadcast (node 0), so every one of
 them gets its own play_result — and its own retries: a play is repeated every
-400 ms until that Node answers, up to 4 times, same as the GUIs. Exits 0 only
+400 ms until that Node answers, up to 4 times, same as the GUIs. All retries
+share one play_id, so they don't restart a Node that's already playing; each
+run of this script uses a new one, restarting the sequence from the top. Exits 0 only
 if every Node reported it is playing.
 """
 
 import argparse
 import json
 import queue
+import random
 import sys
 import time
 
@@ -129,6 +132,7 @@ def play_on_nodes(master, nodes, name):
     results = {}
     attempts = {n: 0 for n in nodes}
     next_send = {n: 0.0 for n in nodes}  # monotonic time of each Node's next try
+    play_id = random.randint(1, 0xFFFFFFFF)
 
     while len(results) < len(nodes):
         now = time.monotonic()
@@ -140,7 +144,7 @@ def play_on_nodes(master, nodes, name):
                 results[node] = (None, "no reply (offline, or firmware older than 2.3.0?)")
                 continue
             attempts[node] += 1
-            master.send({"cmd": "remote_play", "node": node, "name": name})
+            master.send({"cmd": "remote_play", "node": node, "name": name, "play_id": play_id})
             next_send[node] = now + interval
 
         pending = [next_send[n] for n in nodes if n not in results]
@@ -157,7 +161,7 @@ def play_on_nodes(master, nodes, name):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Make every Node the Master knows about loop a sequence saved on its own flash."
+        description="Make every Node the Master knows about play (once) a sequence saved on its own flash."
     )
     parser.add_argument("name", help="name of the recording saved on the Nodes")
     parser.add_argument("--port", help="the Master's serial port (default: probe every port)")
